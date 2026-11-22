@@ -1,0 +1,149 @@
+{
+	"version": 1,
+	"fetched_at": "2025-11-22T20:00:00.000Z",
+	"source": "croma",
+	"as_of": "2025-11-22T15:00:00-05:00",
+	"counts": { "stops": 6, "routes": 2, "patterns": 2 },
+	"stops": [
+		{
+			"id": "sitp-76",
+			"code": null,
+			"name": "Calle 76 / Carrera 20",
+			"kind": "stop",
+			"lat": 4.664,
+			"lon": -74.0605,
+			"parent": null,
+			"platforms": [],
+			"systems": ["zonal_urbano"],
+			"route_ids": ["zonal-466"],
+			"route_codes": ["466"]
+		},
+		{
+			"id": "sitp-calle100",
+			"code": null,
+			"name": "Calle 100 SITP",
+			"kind": "stop",
+			"lat": 4.6855,
+			"lon": -74.0545,
+			"parent": null,
+			"platforms": [],
+			"systems": ["zonal_urbano"],
+			"route_ids": ["zonal-466"],
+			"route_codes": ["466"]
+		},
+		{
+			"id": "55007",
+			"code": null,
+			"name": "Calle 100",
+			"kind": "station",
+			"lat": 4.6862,
+			"lon": -74.0552,
+			"parent": null,
+			"platforms": ["56001"],
+			"systems": ["troncal"],
+			"route_ids": ["r-b907-n"],
+			"route_codes": ["B907"]
+		},
+		{
+			"id": "56001",
+			"code": null,
+			"name": "Calle 100 T1",
+			"kind": "stop",
+			"lat": 4.6863,
+			"lon": -74.0553,
+			"parent": "55007",
+			"platforms": [],
+			"systems": ["troncal"],
+			"route_ids": ["r-b907-n"],
+			"route_codes": ["B907"]
+		},
+		{
+			"id": "55770",
+			"code": null,
+			"name": "Portal del Norte",
+			"kind": "station",
+			"lat": 4.7616,
+			"lon": -74.0463,
+			"parent": null,
+			"platforms": ["56496"],
+			"systems": ["troncal"],
+			"route_ids": ["r-b907-n"],
+			"route_codes": ["B907"]
+		},
+		{
+			"id": "56496",
+			"code": null,
+			"name": "Portal Norte T1",
+			"kind": "stop",
+			"lat": 4.7617,
+			"lon": -74.0464,
+			"parent": "55770",
+			"platforms": [],
+			"systems": ["troncal"],
+			"route_ids": ["r-b907-n"],
+			"route_codes": ["B907"]
+		}
+	],
+	"routes": [
+		{
+			"id": "zonal-466",
+			"code": "466",
+			"name": "Calle 76 - Portal Norte",
+			"system": "zonal_urbano",
+			"color": "#0072BC",
+			"patterns": [
+				{
+					"shape_id": "z466",
+					"stops": [
+						{
+							"id": "sitp-76",
+							"seq": 0,
+							"offset": 0,
+							"name": "Calle 76 / Carrera 20",
+							"lat": 4.664,
+							"lon": -74.0605
+						},
+						{
+							"id": "sitp-calle100",
+							"seq": 1,
+							"offset": 1080,
+							"name": "Calle 100 SITP",
+							"lat": 4.6855,
+							"lon": -74.0545
+						}
+					]
+				}
+			]
+		},
+		{
+			"id": "r-b907-n",
+			"code": "B907",
+			"name": "Portal del Norte",
+			"system": "troncal",
+			"color": "#E31937",
+			"patterns": [
+				{
+					"shape_id": "b907",
+					"stops": [
+						{
+							"id": "56001",
+							"seq": 0,
+							"offset": 0,
+							"name": "Calle 100 T1",
+							"lat": 4.6863,
+							"lon": -74.0553
+						},
+						{
+							"id": "56496",
+							"seq": 1,
+							"offset": 960,
+							"name": "Portal Norte T1",
+							"lat": 4.7617,
+							"lon": -74.0464
+						}
+					]
+				}
+			]
+		}
+	]
+}

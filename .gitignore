@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+
+# Build
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test coverage
+coverage/
+
+# Verification scratch (committed screenshots live in docs/assets/)
+artifacts/*
+!artifacts/.gitkeep
+
+# Local Croma network snapshot (generate with pnpm network:sync; do not commit)
+# Croma ToS §4: do not redistribute the Services without written permission.
+data/network/*.json
+!data/network/README.md
+
+# Croma HTTP response cache + call ledger (credit-saving; do not commit)
+data/croma-cache/
+
+# Vercel
+.vercel/
+tsconfig.tsbuildinfo

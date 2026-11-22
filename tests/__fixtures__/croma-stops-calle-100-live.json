@@ -1,0 +1,66 @@
+{
+	"data": {
+		"as_of": "2025-11-22T15:00:00-05:00",
+		"query": "Calle 100",
+		"route": null,
+		"kind": "station",
+		"latitude": null,
+		"longitude": null,
+		"radius_m": null,
+		"total": 1,
+		"total_is_exact": true,
+		"page": 1,
+		"per_page": 20,
+		"total_pages": 1,
+		"count": 1,
+		"stops": [
+			{
+				"stop_id": "55007",
+				"code": null,
+				"name": "Calle 100",
+				"kind": "station",
+				"parent_station": null,
+				"latitude": 4.6858,
+				"longitude": -74.0548,
+				"wheelchair_boarding": "accessible",
+				"zone_id": null,
+				"route_ids": ["r-b907-n", "r-bc917-n", "r-b902-n", "r-ba947-n"],
+				"route_codes": ["B907", "BC917", "B902", "BA947"],
+				"routes": [
+					{
+						"route_id": "r-b907-n",
+						"short_name": "B907",
+						"long_name": "Portal del Norte",
+						"system": "troncal"
+					},
+					{
+						"route_id": "r-bc917-n",
+						"short_name": "BC917",
+						"long_name": "Portal del Norte",
+						"system": "troncal"
+					},
+					{
+						"route_id": "r-b902-n",
+						"short_name": "B902",
+						"long_name": "Portal del Norte",
+						"system": "troncal"
+					},
+					{
+						"route_id": "r-ba947-n",
+						"short_name": "BA947",
+						"long_name": "Portal del Norte",
+						"system": "troncal"
+					}
+				],
+				"systems": ["troncal"],
+				"platforms": ["56001", "56002"],
+				"address": "Autonorte - Calle 100",
+				"street": null,
+				"locality": null,
+				"wagons": 3,
+				"entrances": 2,
+				"distance_m": null
+			}
+		]
+	}
+}

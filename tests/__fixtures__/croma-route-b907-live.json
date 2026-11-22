@@ -1,0 +1,80 @@
+{
+	"data": {
+		"as_of": "2025-11-22T15:00:00-05:00",
+		"found": true,
+		"route_id": "r-b907-s",
+		"route": {
+			"route_id": "r-b907-s",
+			"short_name": "B907",
+			"long_name": "Portal Sur",
+			"system": "troncal",
+			"system_name": "Transmilenio-Troncal",
+			"mode": "bus",
+			"color": "#E31937",
+			"text_color": "#FFFFFF",
+			"stops_count": 4,
+			"trips_per_week": 420,
+			"first_departure": "04:30:00",
+			"last_departure": "23:45:00",
+			"services": [
+				{
+					"service_id": "weekday",
+					"days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+					"trips": 70,
+					"first_departure": "04:30:00",
+					"last_departure": "23:45:00"
+				}
+			],
+			"headways": [],
+			"patterns": [
+				{
+					"shape_id": "shape-b907-s",
+					"trips_per_week": 420,
+					"length_m": 18500,
+					"stops": [
+						{
+							"sequence": 0,
+							"stop_id": "56496",
+							"name": "Portal Norte T1",
+							"code": null,
+							"latitude": 4.7616,
+							"longitude": -74.0463,
+							"offset_seconds": 0
+						},
+						{
+							"sequence": 1,
+							"stop_id": "56120",
+							"name": "Toberin",
+							"code": null,
+							"latitude": 4.74,
+							"longitude": -74.05,
+							"offset_seconds": 360
+						},
+						{
+							"sequence": 2,
+							"stop_id": "56001",
+							"name": "Calle 100",
+							"code": null,
+							"latitude": 4.6858,
+							"longitude": -74.0548,
+							"offset_seconds": 1080
+						},
+						{
+							"sequence": 3,
+							"stop_id": "55900",
+							"name": "Calle 85",
+							"code": null,
+							"latitude": 4.67,
+							"longitude": -74.056,
+							"offset_seconds": 1260
+						}
+					],
+					"geometry": null
+				}
+			],
+			"origin": "Portal del Norte",
+			"destination": "Portal Sur",
+			"hours": null
+		}
+	}
+}
