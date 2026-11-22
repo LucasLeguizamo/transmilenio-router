@@ -26,108 +26,141 @@ const RouteMap = dynamic(
 	},
 );
 
+/** Multimodal fixture: SITP zonal → walk transfer → TransMilenio trunk. */
 const SAMPLE_PLAN: RoutePlan = {
 	origin: {
-		latitude: 4.7616,
-		longitude: -74.0463,
-		name: "Portal Norte",
+		latitude: 4.6636,
+		longitude: -74.0603,
+		name: "Calle 76 con Carrera 20, Bogotá",
 	},
 	destination: {
-		latitude: 4.601,
-		longitude: -74.068,
-		name: "Museo Nacional",
+		latitude: 4.7338,
+		longitude: -74.0613,
+		name: "Colina Campestre, Bogotá",
 	},
 	segments: [
 		{
 			kind: "walk",
 			from: {
-				latitude: 4.7616,
-				longitude: -74.0463,
-				name: "Portal Norte area",
+				latitude: 4.6636,
+				longitude: -74.0603,
+				name: "Calle 76 con Carrera 20",
 			},
 			to: {
-				stop_id: "10001",
-				name: "Portal Norte",
-				latitude: 4.7616,
-				longitude: -74.0463,
+				stop_id: "sitp-76",
+				name: "Calle 76 / Carrera 20",
+				latitude: 4.664,
+				longitude: -74.0605,
 			},
-			distanceMeters: 120,
-			estimatedMinutes: 2,
+			distanceMeters: 180,
+			estimatedMinutes: 3,
 		},
 		{
 			kind: "transit",
 			route: {
-				route_id: "10075",
-				short_name: "B10",
-				long_name: "Portal Norte - Museo Nacional",
+				route_id: "zonal-466",
+				short_name: "466",
+				long_name: "Calle 76 - Portal Norte",
+				system: "zonal_urbano",
+				color: "#0072BC",
+			},
+			boardStop: {
+				stop_id: "sitp-76",
+				name: "Calle 76 / Carrera 20",
+				latitude: 4.664,
+				longitude: -74.0605,
+			},
+			alightStop: {
+				stop_id: "tm-calle100",
+				name: "Calle 100",
+				latitude: 4.6858,
+				longitude: -74.0548,
+			},
+			intermediateStops: [],
+			estimatedMinutes: 18,
+			geometry: [
+				[-74.0605, 4.664],
+				[-74.058, 4.67],
+				[-74.055, 4.68],
+				[-74.0548, 4.6858],
+			],
+		},
+		{
+			kind: "transfer",
+			fromStop: {
+				stop_id: "tm-calle100",
+				name: "Calle 100 (SITP)",
+				latitude: 4.6858,
+				longitude: -74.0548,
+			},
+			toStop: {
+				stop_id: "55007",
+				name: "Calle 100 (TransMilenio)",
+				latitude: 4.6862,
+				longitude: -74.0552,
+			},
+			walkMinutes: 4,
+		},
+		{
+			kind: "transit",
+			route: {
+				route_id: "r-b907-n",
+				short_name: "B907",
+				long_name: "Portal del Norte",
 				system: "troncal",
 				color: "#E31937",
 			},
 			boardStop: {
-				stop_id: "10001",
-				name: "Portal Norte",
+				stop_id: "55007",
+				name: "Calle 100",
+				latitude: 4.6862,
+				longitude: -74.0552,
+			},
+			alightStop: {
+				stop_id: "55770",
+				name: "Portal del Norte",
 				latitude: 4.7616,
 				longitude: -74.0463,
 			},
-			alightStop: {
-				stop_id: "10050",
-				name: "Calle 26",
-				latitude: 4.609,
-				longitude: -74.07,
-			},
 			intermediateStops: [
 				{
-					stop_id: "10020",
-					name: "Calle 127",
-					latitude: 4.71,
+					stop_id: "56120",
+					name: "Toberin",
+					latitude: 4.74,
 					longitude: -74.05,
 				},
-				{
-					stop_id: "10030",
-					name: "Calle 100",
-					latitude: 4.68,
-					longitude: -74.055,
-				},
-				{
-					stop_id: "10040",
-					name: "Calle 72",
-					latitude: 4.65,
-					longitude: -74.063,
-				},
 			],
-			estimatedMinutes: 20,
+			estimatedMinutes: 16,
 			geometry: [
+				[-74.0552, 4.6862],
+				[-74.05, 4.74],
 				[-74.0463, 4.7616],
-				[-74.05, 4.71],
-				[-74.055, 4.68],
-				[-74.063, 4.65],
-				[-74.07, 4.609],
 			],
 		},
 		{
 			kind: "walk",
 			from: {
-				latitude: 4.609,
-				longitude: -74.07,
-				name: "Calle 26",
+				latitude: 4.7616,
+				longitude: -74.0463,
+				name: "Portal del Norte",
 			},
 			to: {
 				stop_id: "dest",
-				name: "Museo Nacional",
-				latitude: 4.601,
-				longitude: -74.068,
+				name: "Colina Campestre",
+				latitude: 4.7338,
+				longitude: -74.0613,
 			},
-			distanceMeters: 350,
-			estimatedMinutes: 5,
+			distanceMeters: 900,
+			estimatedMinutes: 12,
 		},
 	],
-	totalMinutes: 27,
-	totalWalkMinutes: 7,
-	transferCount: 0,
+	totalMinutes: 53,
+	totalWalkMinutes: 19,
+	transferCount: 1,
 	alerts: [],
 	timestamp: new Date().toISOString(),
 	limitations: [
-		"Sample fixture route for UI verification. Live planning requires CROMA_API_KEY.",
+		"Sample multimodal fixture (SITP Urbano + TransMilenio). Live planning requires CROMA_API_KEY.",
 	],
 };
 
@@ -154,10 +187,10 @@ export default function RouteMapPreviewPage() {
 					TransMilenio MCP
 				</p>
 				<h1 style={{ margin: "0.25rem 0", fontSize: "1.5rem" }}>
-					Route preview
+					Multimodal route preview
 				</h1>
 				<p style={{ margin: 0, color: "#6b7280" }}>
-					Portal Norte → Museo Nacional (fixture data)
+					Calle 76 con Carrera 20 → Colina Campestre (SITP + TransMilenio)
 				</p>
 			</header>
 

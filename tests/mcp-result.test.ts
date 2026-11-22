@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
 	isSuccessfulToolResult,
 	isSuccessfulPlanRouteResult,
+	isSuccessfulMultimodalPlanRouteResult,
 	isSuccessfulToolResultFor,
 } from "../src/lib/mcp/result";
 import liveNoRoute from "./__fixtures__/mcp-plan-route-no-stations.json";
+import multimodalFixture from "./__fixtures__/mcp-plan-route-multimodal.json";
 
 describe("isSuccessfulToolResult", () => {
 	it("passes a normal tool success payload", () => {
@@ -58,11 +60,38 @@ describe("isSuccessfulPlanRouteResult", () => {
 					{
 						type: "text",
 						text:
-							"Route from Portal del Norte to Calle 100\nTotal time: ~25 minutes\n\nSteps:\n1. Take B10 from Portal del Norte to Calle 100 (~20 min)",
+							"Route from Portal del Norte to Calle 100\nTotal time: ~25 minutes\n\nSteps:\n1. Take B10 (TransMilenio/troncal) from Portal del Norte to Calle 100 (~20 min)",
 					},
 				],
 			}),
 		).toBe(true);
+	});
+});
+
+describe("isSuccessfulMultimodalPlanRouteResult", () => {
+	it("accepts the recorded Calle 76 → Colina Campestre fixture", () => {
+		expect(isSuccessfulMultimodalPlanRouteResult(multimodalFixture)).toBe(
+			true,
+		);
+		expect(
+			isSuccessfulToolResultFor("plan_route", multimodalFixture, {
+				multimodal: true,
+			}),
+		).toBe(true);
+	});
+
+	it("rejects a single-system plan", () => {
+		expect(
+			isSuccessfulMultimodalPlanRouteResult({
+				content: [
+					{
+						type: "text",
+						text:
+							"Steps:\n1. Take B10 (TransMilenio/troncal) from A to B (~20 min)\n2. Take B11 (TransMilenio/troncal) from B to C (~10 min)",
+					},
+				],
+			}),
+		).toBe(false);
 	});
 });
 

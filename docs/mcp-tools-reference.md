@@ -48,42 +48,55 @@ Plan a TransMilenio route between two locations.
 }
 ```
 
-### Example Call
+### Example Call (station → station)
 
 ```json
 {
   "name": "plan_route",
   "arguments": {
     "origin": "Portal Norte",
-    "destination": "Museo Nacional"
+    "destination": "Calle 100",
+    "maxTransfers": 1
   }
 }
 ```
 
-### Response
+### Example Call (multimodal: address → neighborhood)
 
 ```json
 {
-  "content": [
-    {
-      "type": "text",
-      "text": "Route from Portal Norte to Museo Nacional\nTotal time: ~25 minutes\nWalking: 5 minutes\nTransfers: 0\n\nSteps:\n1. Walk 200m to Portal Norte (~3 min)\n2. Take B10 from Portal Norte to Calle 26 (~20 min)\n3. Walk 150m to Museo Nacional (~2 min)"
-    }
-  ],
-  "_meta": {
-    "ui": "ui://transmilenio-mcp/route-map?data=..."
+  "name": "plan_route",
+  "arguments": {
+    "origin": "Calle 76 con Carrera 20, Bogotá",
+    "destination": "Colina Campestre, Bogotá",
+    "maxTransfers": 2,
+    "maxWalkMeters": 1200
   }
 }
+```
+
+Live smoke: `pnpm verify mcp --live` includes this pair as `plan_route_multimodal` and requires ≥2 transit legs with different Croma `system` values.
+
+### Response
+
+Transit legs are labeled with transport type (`Label/system`):
+
+```text
+2. Take 466 (SITP Urbano/zonal_urbano) from Calle 76 / Carrera 20 to Calle 100 (~18 min)
+3. Transfer at Calle 100 (SITP) → Calle 100 (TransMilenio) (~4 min)
+4. Take B907 (TransMilenio/troncal) from Calle 100 to Portal del Norte (~16 min)
 ```
 
 ### UI Resource
 
 The `_meta.ui` URL renders an interactive map showing:
-- Route polyline with TransMilenio colors
-- Origin marker (green)
-- Destination marker (red)
-- Station markers at board/alight points
-- Transfer indicators (if applicable)
+- Route polylines colored **per Croma system** (troncal red, zonal blue, alimentador green, …)
+- Distinct board/alight badges per transport type
+- Origin marker (green) / destination marker (red)
+- Transfer marker (⇄) and dashed walk between hubs when systems change
+- Legend of systems used on the trip
+
+See also the preview screenshot: `docs/images/multimodal-route-map.png`.
 
 ### Error Cases
 

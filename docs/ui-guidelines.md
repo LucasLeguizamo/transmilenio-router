@@ -66,14 +66,17 @@ type RouteMapProps = {
 **Markers:**
 - Origin: Green circle
 - Destination: Red circle
-- Stations: Colored by system
-- Transfers: Orange circle
+- Board/alight: System badge (TM / S / A / C) colored by `system`, not raw GTFS color
+- Transfers: Orange ⇄ marker (and dashed orange walk when hubs differ)
 
 **Lines:**
-- Transit: Solid, 5px, route color
+- Transit: Solid, 5px, **system color** (so multimodal legs stay distinct)
 - Walk: Dashed, 3px, gray
+- Legend: lists each system used on the plan
 
 **Bounds:** Auto-fit to show all markers with 50px padding.
+
+**Multimodal preview:** `/preview/route-map` shows Calle 76 con Carrera 20 → Colina Campestre (SITP + TransMilenio). Screenshot: `docs/images/multimodal-route-map.png`.
 
 ### RouteDetails
 

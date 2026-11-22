@@ -1,6 +1,11 @@
 import { CromaClient, getCromaClient } from "../croma/client";
 import type { Stop, Alert } from "../croma/types";
 import type { Route, RouteStop as PatternStop } from "../croma/types";
+import {
+	geocodeBogota,
+	looksLikeBogotaAddress,
+	looksLikeNeighborhood,
+} from "../geocode/bogota";
 import type {
 	RoutePlanRequest,
 	RoutePlanResult,
@@ -13,6 +18,9 @@ import type {
 
 const WALK_SPEED_KMH = 4.5;
 const DEFAULT_MAX_WALK_METERS = 800;
+/** Wider catch radius after geocoding an address/neighborhood. */
+const GEOCODED_MAX_WALK_METERS = 1200;
+const TRANSFER_WALK_METERS = 350;
 const DEFAULT_MAX_TRANSFERS = 2;
 
 function haversineDistance(
@@ -359,8 +367,8 @@ export class RoutePlanner {
 
 	/**
 	 * Resolve a text or coordinate endpoint into a point plus candidate stops.
-	 * Text inputs use Croma stops-search (stations preferred) and keep those
-	 * matches as candidates — they are not discarded for a second proximity pass.
+	 * Station/stop names use Croma search; addresses and neighborhoods geocode
+	 * via Nominatim then load nearby stops of every Croma system.
 	 */
 	private async resolveEndpoint(
 		location: RoutePlanRequest["origin"],
@@ -374,34 +382,14 @@ export class RoutePlanner {
 					location.text ??
 					`${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`,
 			};
-
-			const stations = await this.client.searchStops({
-				latitude: location.latitude,
-				longitude: location.longitude,
-				radius_m: maxWalkMeters,
-				kind: "station",
-				per_page: 20,
-			});
-			if (stations.kind === "error") {
-				return { point, stops: [], source: "coordinates" };
-			}
-
-			let stops = stations.data.data.stops;
-			if (stops.length === 0) {
-				const anyStops = await this.client.searchStops({
-					latitude: location.latitude,
-					longitude: location.longitude,
-					radius_m: maxWalkMeters,
-					per_page: 20,
-				});
-				if (anyStops.kind === "success") {
-					stops = anyStops.data.data.stops;
-				}
-			}
-
+			const stops = await this.searchNearbyStops(
+				point.latitude,
+				point.longitude,
+				maxWalkMeters,
+			);
 			return {
 				point,
-				stops: await this.enrichStopsWithPlatforms(stops.slice(0, 10)),
+				stops: await this.enrichStopsWithPlatforms(stops.slice(0, 15)),
 				source: "coordinates",
 			};
 		}
@@ -411,6 +399,32 @@ export class RoutePlanner {
 		}
 
 		const query = location.text.trim();
+		const preferGeocode =
+			looksLikeBogotaAddress(query) || looksLikeNeighborhood(query);
+
+		if (!preferGeocode) {
+			const named = await this.resolveByStopName(query);
+			if (named && named.stops.length > 0) {
+				return named;
+			}
+		}
+
+		const geocoded = await this.resolveByGeocode(query, maxWalkMeters);
+		if (geocoded && geocoded.stops.length > 0) {
+			return geocoded;
+		}
+
+		if (preferGeocode) {
+			const named = await this.resolveByStopName(query);
+			if (named && named.stops.length > 0) {
+				return named;
+			}
+		}
+
+		return geocoded;
+	}
+
+	private async resolveByStopName(query: string): Promise<ResolvedEndpoint | null> {
 		const stationMatches = await this.client.searchStops({
 			query,
 			kind: "station",
@@ -448,6 +462,69 @@ export class RoutePlanner {
 			stops: enriched,
 			source: "name",
 		};
+	}
+
+	private async resolveByGeocode(
+		query: string,
+		maxWalkMeters: number,
+	): Promise<ResolvedEndpoint | null> {
+		const geo = await geocodeBogota(query);
+		if (geo.kind === "error" || geo.kind === "not_found") {
+			return null;
+		}
+
+		const radius = Math.max(maxWalkMeters, GEOCODED_MAX_WALK_METERS);
+		const point: ResolvedPoint = {
+			latitude: geo.point.latitude,
+			longitude: geo.point.longitude,
+			name: geo.point.displayName || query,
+		};
+		const stops = await this.searchNearbyStops(
+			point.latitude,
+			point.longitude,
+			radius,
+		);
+		return {
+			point,
+			stops: await this.enrichStopsWithPlatforms(stops.slice(0, 15)),
+			source: "coordinates",
+		};
+	}
+
+	/** Nearby stops of every system (stations first, then any kind). */
+	private async searchNearbyStops(
+		latitude: number,
+		longitude: number,
+		radiusMeters: number,
+	): Promise<Stop[]> {
+		const stations = await this.client.searchStops({
+			latitude,
+			longitude,
+			radius_m: radiusMeters,
+			kind: "station",
+			per_page: 20,
+		});
+		const anyStops = await this.client.searchStops({
+			latitude,
+			longitude,
+			radius_m: radiusMeters,
+			per_page: 20,
+		});
+
+		const byId = new Map<string, Stop>();
+		if (stations.kind === "success") {
+			for (const stop of stations.data.data.stops) {
+				byId.set(stop.stop_id, stop);
+			}
+		}
+		if (anyStops.kind === "success") {
+			for (const stop of anyStops.data.data.stops) {
+				if (!byId.has(stop.stop_id)) {
+					byId.set(stop.stop_id, stop);
+				}
+			}
+		}
+		return [...byId.values()];
 	}
 
 	/**
@@ -743,8 +820,17 @@ export class RoutePlanner {
 		totalWalkMinutes: number;
 		transferCount: number;
 	} | null> {
-		for (const originStop of originStops) {
-			for (const originRouteId of originStop.route_ids.slice(0, 3)) {
+		type Built = {
+			segments: (WalkSegment | RouteSegment | TransferSegment)[];
+			totalMinutes: number;
+			totalWalkMinutes: number;
+			transferCount: number;
+			score: number;
+		};
+		const state: { best: Built | null } = { best: null };
+
+		for (const originStop of originStops.slice(0, 8)) {
+			for (const originRouteId of originStop.route_ids.slice(0, 4)) {
 				const originRouteResult = await this.client.getRoute(
 					originRouteId,
 					false,
@@ -756,194 +842,323 @@ export class RoutePlanner {
 					continue;
 				}
 				const originRoute = originRouteResult.data.data.route;
-				const originPattern = originRoute.patterns?.[0];
-				if (!originPattern) continue;
+				const patterns = originRoute.patterns ?? [];
+				for (const originPattern of patterns.slice(0, 2)) {
+					const boardIdx = findStopIndexInPattern(originPattern.stops, [
+						originStop,
+						...originStops,
+					]);
+					if (boardIdx === -1) continue;
 
-				const boardIdx = findStopIndexInPattern(originPattern.stops, [
-					originStop,
-					...originStops,
-				]);
-				if (boardIdx === -1) continue;
-
-				for (
-					let transferIdx = boardIdx + 1;
-					transferIdx < originPattern.stops.length;
-					transferIdx++
-				) {
-					const transferStopData = originPattern.stops[transferIdx];
-					const transferStopResult = await this.client.getStop(
-						transferStopData.stop_id,
+					const step = Math.max(
+						1,
+						Math.floor((originPattern.stops.length - boardIdx) / 12),
 					);
-					if (
-						transferStopResult.kind !== "success" ||
-						!transferStopResult.data.data.stop
+					for (
+						let transferIdx = boardIdx + 1;
+						transferIdx < originPattern.stops.length;
+						transferIdx += step
 					) {
-						continue;
-					}
-					const transferStop = transferStopResult.data.data.stop;
-					const connecting = candidateRouteIds([transferStop], destStops)
-						.routeIds.filter((id) => id !== originRouteId)
-						.slice(0, 3);
+						const transferStopData = originPattern.stops[transferIdx];
+						const hubs = await this.collectTransferHubs(transferStopData);
+						for (const hub of hubs) {
+							const connectingIds = candidateRouteIds([hub.stop], destStops)
+								.routeIds.filter((id) => id !== originRouteId)
+								.slice(0, 4);
 
-					for (const connectingId of connecting) {
-						const connectingRouteResult = await this.client.getRoute(
-							connectingId,
-							true,
-						);
-						if (
-							connectingRouteResult.kind !== "success" ||
-							!connectingRouteResult.data.data.route
-						) {
-							continue;
+							for (const connectingId of connectingIds) {
+								const built = await this.buildTwoLegTransfer({
+									originRoute,
+									originPatternStops: originPattern.stops,
+									boardIdx,
+									transferIdx,
+									transferAlight: patternStopPoint(transferStopData),
+									hubStop: hub.stop,
+									hubWalkMeters: hub.walkMeters,
+									connectingId,
+									destStops,
+									originCoords,
+									destCoords,
+								});
+								if (
+									built &&
+									(!state.best || built.score > state.best.score)
+								) {
+									state.best = built;
+								}
+								if (state.best && state.best.score >= 80) {
+									return {
+										segments: state.best.segments,
+										totalMinutes: state.best.totalMinutes,
+										totalWalkMinutes: state.best.totalWalkMinutes,
+										transferCount: state.best.transferCount,
+									};
+								}
+							}
 						}
-						const connectingRoute = connectingRouteResult.data.data.route;
-						const connectingPattern = connectingRoute.patterns?.[0];
-						if (!connectingPattern) continue;
-
-						const secondBoardIdx = findStopIndexInPattern(
-							connectingPattern.stops,
-							[transferStop],
-						);
-						const alightIdx = findStopIndexInPattern(
-							connectingPattern.stops,
-							destStops,
-						);
-						if (
-							secondBoardIdx === -1 ||
-							alightIdx === -1 ||
-							secondBoardIdx >= alightIdx
-						) {
-							continue;
-						}
-
-						const boardStop = patternStopPoint(originPattern.stops[boardIdx]);
-						const transferPoint = patternStopPoint(transferStopData);
-						const alightStop = patternStopPoint(
-							connectingPattern.stops[alightIdx],
-						);
-
-						const walkToOrigin = haversineDistance(
-							originCoords.latitude,
-							originCoords.longitude,
-							boardStop.latitude,
-							boardStop.longitude,
-						);
-						const walkFromDest = haversineDistance(
-							alightStop.latitude,
-							alightStop.longitude,
-							destCoords.latitude,
-							destCoords.longitude,
-						);
-						const walkToOriginMin = walkMinutes(walkToOrigin);
-						const walkFromDestMin = walkMinutes(walkFromDest);
-						const firstLegMinutes = this.estimateTransitTime(
-							originPattern.stops,
-							boardIdx,
-							transferIdx,
-						);
-						const secondLegMinutes = this.estimateTransitTime(
-							connectingPattern.stops,
-							secondBoardIdx,
-							alightIdx,
-						);
-
-						const segments: (WalkSegment | RouteSegment | TransferSegment)[] =
-							[];
-						if (walkToOrigin > 50) {
-							segments.push({
-								kind: "walk",
-								from: {
-									latitude: originCoords.latitude,
-									longitude: originCoords.longitude,
-									name: originCoords.name,
-								},
-								to: boardStop,
-								distanceMeters: Math.round(walkToOrigin),
-								estimatedMinutes: walkToOriginMin,
-							});
-						}
-						segments.push({
-							kind: "transit",
-							route: {
-								route_id: originRoute.route_id,
-								short_name: originRoute.short_name,
-								long_name: originRoute.long_name,
-								system: originRoute.system,
-								color: originRoute.color,
-							},
-							boardStop,
-							alightStop: transferPoint,
-							intermediateStops: originPattern.stops
-								.slice(boardIdx + 1, transferIdx)
-								.map(patternStopPoint),
-							estimatedMinutes: firstLegMinutes,
-							geometry: null,
-						});
-						segments.push({
-							kind: "transfer",
-							fromStop: transferPoint,
-							toStop: transferPoint,
-							walkMinutes: 3,
-						});
-						segments.push({
-							kind: "transit",
-							route: {
-								route_id: connectingRoute.route_id,
-								short_name: connectingRoute.short_name,
-								long_name: connectingRoute.long_name,
-								system: connectingRoute.system,
-								color: connectingRoute.color,
-							},
-							boardStop: patternStopPoint(
-								connectingPattern.stops[secondBoardIdx],
-							),
-							alightStop,
-							intermediateStops: connectingPattern.stops
-								.slice(secondBoardIdx + 1, alightIdx)
-								.map(patternStopPoint),
-							estimatedMinutes: secondLegMinutes,
-							geometry: connectingPattern.geometry?.coordinates
-								? connectingPattern.geometry.coordinates.map(
-										(coord) => [coord[0], coord[1]] as [number, number],
-									)
-								: null,
-						});
-						if (walkFromDest > 50) {
-							segments.push({
-								kind: "walk",
-								from: {
-									latitude: alightStop.latitude,
-									longitude: alightStop.longitude,
-									name: alightStop.name,
-								},
-								to: {
-									stop_id: alightStop.stop_id,
-									name: destCoords.name,
-									latitude: destCoords.latitude,
-									longitude: destCoords.longitude,
-								},
-								distanceMeters: Math.round(walkFromDest),
-								estimatedMinutes: walkFromDestMin,
-							});
-						}
-
-						return {
-							segments,
-							totalMinutes:
-								walkToOriginMin +
-								firstLegMinutes +
-								3 +
-								secondLegMinutes +
-								walkFromDestMin,
-							totalWalkMinutes: walkToOriginMin + walkFromDestMin,
-							transferCount: 1,
-						};
 					}
 				}
 			}
 		}
 
-		return null;
+		return state.best
+			? {
+					segments: state.best.segments,
+					totalMinutes: state.best.totalMinutes,
+					totalWalkMinutes: state.best.totalWalkMinutes,
+					transferCount: state.best.transferCount,
+				}
+			: null;
+	}
+
+	/**
+	 * Transfer hub = the pattern stop itself plus nearby stops (other systems)
+	 * within TRANSFER_WALK_METERS for multimodal walk transfers.
+	 */
+	private async collectTransferHubs(
+		transferStopData: PatternStop,
+	): Promise<Array<{ stop: Stop; walkMeters: number }>> {
+		const hubs: Array<{ stop: Stop; walkMeters: number }> = [];
+		const seen = new Set<string>();
+
+		const detail = await this.client.getStop(transferStopData.stop_id);
+		if (detail.kind === "success" && detail.data.data.stop) {
+			const stop = detail.data.data.stop;
+			hubs.push({ stop, walkMeters: 0 });
+			seen.add(stop.stop_id);
+		}
+
+		const lat = transferStopData.latitude;
+		const lon = transferStopData.longitude;
+		if (lat == null || lon == null) {
+			return hubs;
+		}
+
+		const nearby = await this.searchNearbyStops(
+			lat,
+			lon,
+			TRANSFER_WALK_METERS,
+		);
+		for (const stop of nearby) {
+			if (seen.has(stop.stop_id)) continue;
+			seen.add(stop.stop_id);
+			const walk = haversineDistance(lat, lon, stop.latitude, stop.longitude);
+			if (walk <= TRANSFER_WALK_METERS) {
+				hubs.push({ stop, walkMeters: walk });
+			}
+		}
+		return hubs.slice(0, 6);
+	}
+
+	private async buildTwoLegTransfer(args: {
+		originRoute: Route;
+		originPatternStops: PatternStop[];
+		boardIdx: number;
+		transferIdx: number;
+		transferAlight: {
+			stop_id: string;
+			name: string;
+			latitude: number;
+			longitude: number;
+		};
+		hubStop: Stop;
+		hubWalkMeters: number;
+		connectingId: string;
+		destStops: Stop[];
+		originCoords: { latitude: number; longitude: number; name: string };
+		destCoords: { latitude: number; longitude: number; name: string };
+	}): Promise<{
+		segments: (WalkSegment | RouteSegment | TransferSegment)[];
+		totalMinutes: number;
+		totalWalkMinutes: number;
+		transferCount: number;
+		score: number;
+	} | null> {
+		const {
+			originRoute,
+			originPatternStops,
+			boardIdx,
+			transferIdx,
+			transferAlight,
+			hubStop,
+			hubWalkMeters,
+			connectingId,
+			destStops,
+			originCoords,
+			destCoords,
+		} = args;
+
+		const connectingRouteResult = await this.client.getRoute(
+			connectingId,
+			false,
+		);
+		if (
+			connectingRouteResult.kind !== "success" ||
+			!connectingRouteResult.data.data.route
+		) {
+			return null;
+		}
+		const connectingRoute = connectingRouteResult.data.data.route;
+		const connectingPattern = connectingRoute.patterns?.[0];
+		if (!connectingPattern) return null;
+
+		const secondBoardIdx = findStopIndexInPattern(connectingPattern.stops, [
+			hubStop,
+		]);
+		const alightIdx = findStopIndexInPattern(
+			connectingPattern.stops,
+			destStops,
+		);
+		if (
+			secondBoardIdx === -1 ||
+			alightIdx === -1 ||
+			secondBoardIdx >= alightIdx
+		) {
+			return null;
+		}
+
+		const boardStop = patternStopPoint(originPatternStops[boardIdx]);
+		const secondBoard = patternStopPoint(
+			connectingPattern.stops[secondBoardIdx],
+		);
+		const alightStop = patternStopPoint(connectingPattern.stops[alightIdx]);
+
+		const walkToOrigin = haversineDistance(
+			originCoords.latitude,
+			originCoords.longitude,
+			boardStop.latitude,
+			boardStop.longitude,
+		);
+		const walkFromDest = haversineDistance(
+			alightStop.latitude,
+			alightStop.longitude,
+			destCoords.latitude,
+			destCoords.longitude,
+		);
+		const walkToOriginMin = walkMinutes(walkToOrigin);
+		const walkFromDestMin = walkMinutes(walkFromDest);
+		const transferWalkMin = Math.max(
+			hubWalkMeters > 30 ? walkMinutes(hubWalkMeters) : 2,
+			2,
+		);
+		const firstLegMinutes = this.estimateTransitTime(
+			originPatternStops,
+			boardIdx,
+			transferIdx,
+		);
+		const secondLegMinutes = this.estimateTransitTime(
+			connectingPattern.stops,
+			secondBoardIdx,
+			alightIdx,
+		);
+
+		const segments: (WalkSegment | RouteSegment | TransferSegment)[] = [];
+		if (walkToOrigin > 50) {
+			segments.push({
+				kind: "walk",
+				from: {
+					latitude: originCoords.latitude,
+					longitude: originCoords.longitude,
+					name: originCoords.name,
+				},
+				to: boardStop,
+				distanceMeters: Math.round(walkToOrigin),
+				estimatedMinutes: walkToOriginMin,
+			});
+		}
+		segments.push({
+			kind: "transit",
+			route: {
+				route_id: originRoute.route_id,
+				short_name: originRoute.short_name,
+				long_name: originRoute.long_name,
+				system: originRoute.system,
+				color: originRoute.color,
+			},
+			boardStop,
+			alightStop: transferAlight,
+			intermediateStops: originPatternStops
+				.slice(boardIdx + 1, transferIdx)
+				.map(patternStopPoint),
+			estimatedMinutes: firstLegMinutes,
+			geometry: null,
+		});
+		segments.push({
+			kind: "transfer",
+			fromStop: transferAlight,
+			toStop: secondBoard,
+			walkMinutes: transferWalkMin,
+		});
+		segments.push({
+			kind: "transit",
+			route: {
+				route_id: connectingRoute.route_id,
+				short_name: connectingRoute.short_name,
+				long_name: connectingRoute.long_name,
+				system: connectingRoute.system,
+				color: connectingRoute.color,
+			},
+			boardStop: secondBoard,
+			alightStop,
+			intermediateStops: connectingPattern.stops
+				.slice(secondBoardIdx + 1, alightIdx)
+				.map(patternStopPoint),
+			estimatedMinutes: secondLegMinutes,
+			geometry: null,
+		});
+		if (walkFromDest > 50) {
+			segments.push({
+				kind: "walk",
+				from: {
+					latitude: alightStop.latitude,
+					longitude: alightStop.longitude,
+					name: alightStop.name,
+				},
+				to: {
+					stop_id: alightStop.stop_id,
+					name: destCoords.name,
+					latitude: destCoords.latitude,
+					longitude: destCoords.longitude,
+				},
+				distanceMeters: Math.round(walkFromDest),
+				estimatedMinutes: walkFromDestMin,
+			});
+		}
+
+		const systemsDiffer =
+			originRoute.system !== connectingRoute.system ? 40 : 0;
+		const multimodalBonus =
+			(originRoute.system === "zonal_urbano" ||
+				originRoute.system === "alimentador" ||
+				connectingRoute.system === "zonal_urbano" ||
+				connectingRoute.system === "alimentador") &&
+			(originRoute.system === "troncal" || connectingRoute.system === "troncal")
+				? 30
+				: 0;
+		const durationPenalty = Math.min(
+			walkToOriginMin +
+				firstLegMinutes +
+				transferWalkMin +
+				secondLegMinutes +
+				walkFromDestMin,
+			60,
+		);
+
+		return {
+			segments,
+			totalMinutes:
+				walkToOriginMin +
+				firstLegMinutes +
+				transferWalkMin +
+				secondLegMinutes +
+				walkFromDestMin,
+			totalWalkMinutes:
+				walkToOriginMin +
+				(hubWalkMeters > 30 ? walkMinutes(hubWalkMeters) : 0) +
+				walkFromDestMin,
+			transferCount: 1,
+			score: systemsDiffer + multimodalBonus - durationPenalty / 5,
+		};
 	}
 
 	private estimateTransitTime(

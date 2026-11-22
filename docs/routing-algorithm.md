@@ -19,28 +19,34 @@ Convert origin and destination to coordinates.
 "4.6486,-74.0633" → { latitude: 4.6486, longitude: -74.0633 }
 ```
 
-**Text input:**
+**Station / stop name:**
 ```
-"Portal Norte" → Search stops API → First match coordinates
+"Portal Norte" → Croma stops-search → keep matched stations as board candidates
 ```
 
-Text resolution uses the stops search endpoint as a geocoding proxy. Only locations matching a stop name will resolve.
+**Address / intersection / neighborhood (multimodal):**
+```
+"Calle 76 con Carrera 20, Bogotá" → Nominatim (Bogotá heuristics) → lat/lon
+"Colina Campestre, Bogotá" → Nominatim neighborhood → lat/lon
+```
+
+Addresses use Bogotá patterns (`Calle X con Carrera Y`, `Calle X # Y`). Station-like names such as `Calle 100` stay on Croma stop search.
 
 ### 2. Nearby Stop Search
 
-Find stops within walking distance of origin and destination.
+Find stops within walking distance of origin and destination — **all Croma systems** (`troncal`, `zonal_urbano`, `alimentador`, …), not only trunk stations.
 
 ```
 Croma API: POST /co/transmilenio/stops-search/v1
 {
   latitude: origin.latitude,
   longitude: origin.longitude,
-  radius_m: maxWalkMeters,  // default 800
-  kind: "station"
+  radius_m: maxWalkMeters,  // default 800; geocoded endpoints use ≥1200
+  kind: "station"           // then again without kind for street / zonal stops
 }
 ```
 
-Stations (not individual platforms) are preferred because they have better connectivity data.
+Stations are preferred for connectivity; street stops and feeders are merged so multimodal trips can start or end off the trunk.
 
 ### 3. Direct Route Search
 
@@ -55,21 +61,19 @@ if originStop.route_ids ∩ destStop.route_ids ≠ ∅:
 
 This finds routes that serve both the origin and destination stops.
 
-### 4. Transfer Route Search
+### 4. Multimodal Transfer Search
 
-If no direct route exists, search for one-transfer routes:
+If no direct route exists, search for one-transfer routes **across systems**, including a short walk between nearby hubs:
 
 ```
-for each originStop:
-    for each route serving originStop:
-        for each stop on that route (potential transfer):
-            for each destStop:
-                if transferStop.route_ids ∩ destStop.route_ids ≠ ∅:
-                    // Transfer route found
-                    return buildTransferRoute(...)
+for each originStop / originRoute / pattern stop after board:
+    hubs = [pattern stop] ∪ nearby stops within ~350m (any system)
+    for each hub that shares a route_code/route_id with destination:
+        prefer hub.system ≠ origin.system (e.g. zonal_urbano → troncal)
+        build: walk → transit(system A) → transfer/walk → transit(system B) → walk
 ```
 
-This searches for a stop where the origin route intersects with a route serving the destination.
+Acceptance example: `Calle 76 con Carrera 20, Bogotá` → `Colina Campestre, Bogotá` should yield ≥2 transit legs with different `system` values (e.g. SITP Urbano + TransMilenio).
 
 ### 5. Route Building
 

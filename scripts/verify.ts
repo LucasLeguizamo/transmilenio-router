@@ -19,6 +19,7 @@ import { join } from "path";
 import { chromium, Browser } from "playwright";
 import {
 	isSuccessfulToolResultFor,
+	isSuccessfulMultimodalPlanRouteResult,
 	type ToolResultLike,
 } from "../src/lib/mcp/result";
 
@@ -398,6 +399,28 @@ async function runMCPTests(
 				debug: verbose,
 			}),
 		);
+
+		// Named multimodal smoke: address → neighborhood across systems.
+		try {
+			const multimodal = await tools.planRoute({
+				origin: "Calle 76 con Carrera 20, Bogotá",
+				destination: "Colina Campestre, Bogotá",
+				maxTransfers: 2,
+				maxWalkMeters: 1200,
+				debug: verbose,
+			});
+			results.push({
+				tool: "plan_route_multimodal",
+				success: isSuccessfulMultimodalPlanRouteResult(multimodal),
+				output: multimodal,
+			});
+		} catch (error) {
+			results.push({
+				tool: "plan_route_multimodal",
+				success: false,
+				output: { error: String(error) },
+			});
+		}
 	}
 
 	const success = results.every((r) => r.success);
@@ -412,7 +435,12 @@ async function runMCPTests(
 			if (!result.success && result.output) {
 				console.log(`   Error: ${JSON.stringify(result.output)}`);
 			}
-			if (verbose && result.tool === "plan_route" && result.output) {
+			if (
+				verbose &&
+				(result.tool === "plan_route" ||
+					result.tool === "plan_route_multimodal") &&
+				result.output
+			) {
 				const text = (result.output as ToolResultLike).content
 					?.map((item) => item.text ?? "")
 					.join("\n");

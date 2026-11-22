@@ -26,6 +26,8 @@ Preconditions:
 
 - **Test with live API.** Run `pnpm verify mcp --live`. Verify the response contains actual route data from Croma. Check that the text includes "Route from" and "Total time".
 
+- **Multimodal smoke.** The same live command runs `plan_route_multimodal`: origin `Calle 76 con Carrera 20, Bogotá` → destination `Colina Campestre, Bogotá`. It must succeed with ≥2 `Take … (Label/system)` legs that use **different** systems (e.g. `zonal_urbano` + `troncal`).
+
 - **Debug route search.** Run `pnpm verify mcp --live --verbose` to dump candidate stops (with platforms), shared `route_codes`/`route_ids`, and per-candidate match outcomes when diagnosing "No route found".
 
 - **Verify UI rendering.** The `_meta.ui` URL in the response should start with `ui://transmilenio-mcp/route-map`. When rendered by an MCP Apps host, it displays an interactive Leaflet map.

@@ -4,6 +4,7 @@ import { createRoutePlanner, RoutePlanner } from "../routing/planner";
 import type { RoutePlan, RoutePlanResult } from "../routing/types";
 import type { Stop, Arrival, Alert } from "../croma/types";
 import { decodeHtmlEntities } from "../text/html-entities";
+import { systemLabel } from "../routing/systems";
 
 const DEFAULT_ALERT_LIMIT = 20;
 
@@ -345,16 +346,29 @@ export class MCPTools {
 						`${i + 1}. Walk ${segment.distanceMeters}m to ${segment.to.name} (~${segment.estimatedMinutes} min)`,
 					);
 					break;
-				case "transit":
+				case "transit": {
+					const code = segment.route.short_name ?? segment.route.route_id;
+					const system = segment.route.system;
+					const label = systemLabel(system);
 					lines.push(
-						`${i + 1}. Take ${segment.route.short_name ?? segment.route.route_id} from ${segment.boardStop.name} to ${segment.alightStop.name} (~${segment.estimatedMinutes} min)`,
+						`${i + 1}. Take ${code} (${label}/${system}) from ${segment.boardStop.name} to ${segment.alightStop.name} (~${segment.estimatedMinutes} min)`,
 					);
 					break;
+				}
 				case "transfer":
 					lines.push(
-						`${i + 1}. Transfer at ${segment.fromStop.name} (~${segment.walkMinutes} min)`,
+						`${i + 1}. Transfer at ${segment.fromStop.name}${
+							segment.fromStop.stop_id !== segment.toStop.stop_id
+								? ` → ${segment.toStop.name}`
+								: ""
+						} (~${segment.walkMinutes} min)`,
 					);
 					break;
+				default: {
+					const _exhaustive: never = segment;
+					void _exhaustive;
+					break;
+				}
 			}
 		}
 

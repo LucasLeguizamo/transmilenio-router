@@ -1,31 +1,10 @@
 "use client";
 
 import type { RoutePlan, RoutePlanSegment } from "@/lib/routing/types";
+import { systemColor, systemLabel } from "@/lib/routing/systems";
 
 type RouteDetailsProps = {
 	plan: RoutePlan;
-};
-
-const SYSTEM_LABELS: Record<string, string> = {
-	troncal: "TransMilenio",
-	alimentador: "Feeder",
-	dual: "Dual",
-	zonal_urbano: "SITP Urban",
-	zonal_complementario: "SITP Complementary",
-	zonal_especial: "SITP Special",
-	transmicable: "TransMiCable",
-	other: "Transit",
-};
-
-const SYSTEM_COLORS: Record<string, string> = {
-	troncal: "#E31937",
-	alimentador: "#00A651",
-	dual: "#F7941D",
-	zonal_urbano: "#0072BC",
-	zonal_complementario: "#662D91",
-	zonal_especial: "#00AEEF",
-	transmicable: "#8DC63F",
-	other: "#666666",
 };
 
 function SegmentIcon({ segment }: { segment: RoutePlanSegment }) {
@@ -73,20 +52,26 @@ function formatSegment(segment: RoutePlanSegment, index: number): React.ReactNod
 			);
 
 		case "transit": {
-			const color = segment.route.color ?? SYSTEM_COLORS[segment.route.system] ?? "#666";
-			const systemLabel = SYSTEM_LABELS[segment.route.system] ?? "Transit";
+			const color = systemColor(segment.route.system);
+			const label = systemLabel(segment.route.system);
 			return (
-				<div className="segment transit-segment">
+				<div
+					className="segment transit-segment"
+					style={{ borderLeftColor: color }}
+				>
 					<div className="segment-header">
 						<span className="step-number">{stepNumber}</span>
 						<SegmentIcon segment={segment} />
 						<span
 							className="route-badge"
-							style={{ backgroundColor: color, color: segment.route.color ? "#fff" : undefined }}
+							style={{ backgroundColor: color, color: "#fff" }}
 						>
 							{segment.route.short_name ?? segment.route.route_id}
 						</span>
-						<span className="segment-title">{systemLabel}</span>
+						<span className="segment-title">
+							{label}{" "}
+							<span className="system-code">({segment.route.system})</span>
+						</span>
 						<span className="segment-time">~{segment.estimatedMinutes} min</span>
 					</div>
 					<div className="segment-body">
@@ -119,10 +104,17 @@ function formatSegment(segment: RoutePlanSegment, index: number): React.ReactNod
 					<div className="segment-body">
 						<p>
 							Transfer at <strong>{segment.fromStop.name}</strong>
+							{segment.fromStop.stop_id !== segment.toStop.stop_id
+								? ` → ${segment.toStop.name}`
+								: ""}
 						</p>
 					</div>
 				</div>
 			);
+		default: {
+			const _exhaustive: never = segment;
+			return _exhaustive;
+		}
 	}
 }
 
@@ -195,6 +187,14 @@ export function RouteDetails({ plan }: RouteDetailsProps) {
 					border-radius: 4px;
 					font-weight: 600;
 					font-size: 14px;
+				}
+				.system-code {
+					font-weight: 400;
+					color: var(--text-secondary, #6b7280);
+					font-size: 12px;
+				}
+				.transfer-segment {
+					border-left-color: #f59e0b;
 				}
 				.segment-body {
 					color: var(--text-secondary, #6b7280);
