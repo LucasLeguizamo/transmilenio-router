@@ -9,6 +9,7 @@ import {
 import { haversineDistance, walkMinutes } from "../geo/haversine";
 import { planRouteLocal } from "../network/local-planner";
 import { loadNetworkBundle } from "../network/store";
+import { namesLooselyMatch, scoreStopNameMatch } from "./name-match";
 import type {
 	RoutePlanRequest,
 	RoutePlanResult,
@@ -24,6 +25,7 @@ const DEFAULT_MAX_WALK_METERS = 800;
 const GEOCODED_MAX_WALK_METERS = 1200;
 const TRANSFER_WALK_METERS = 350;
 const DEFAULT_MAX_TRANSFERS = 2;
+const SAME_POINT_METERS = 120;
 
 type ResolvedPoint = {
 	latitude: number;
@@ -38,54 +40,26 @@ type ResolvedEndpoint = {
 	source: "name" | "coordinates";
 };
 
-function scoreStopMatch(stop: Stop, query: string): number {
-	const q = query.trim().toLowerCase();
-	const name = stop.name.toLowerCase();
-	const code = stop.code?.toLowerCase() ?? "";
-	let score = 0;
-
-	if (stop.kind === "station") score += 100;
-	if (name === q || code === q) score += 50;
-	else if (name.startsWith(q) || q.startsWith(name)) score += 30;
-	else if (name.includes(q) || q.includes(name)) score += 15;
-	if (code && (code === q || code.includes(q))) score += 20;
-
-	return score;
-}
-
 function rankStopsByQuery(stops: Stop[], query: string): Stop[] {
-	return [...stops].sort(
-		(a, b) => scoreStopMatch(b, query) - scoreStopMatch(a, query),
-	);
-}
-
-function normalizeStopName(name: string): string {
-	return name
-		.normalize("NFD")
-		.replace(/\p{M}/gu, "")
-		.toLowerCase()
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-/** Strip articles / wagon suffixes so "Portal del Norte" ≈ "Portal Norte T1". */
-function coreStopName(name: string): string {
-	return normalizeStopName(name)
-		.replace(/\b(del|de|la|el|los|las)\b/g, " ")
-		.replace(/\b[a-z]?\d+\b/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-function namesLooselyMatch(a: string, b: string): boolean {
-	const na = normalizeStopName(a);
-	const nb = normalizeStopName(b);
-	if (!na || !nb) return false;
-	if (na === nb || na.includes(nb) || nb.includes(na)) return true;
-	const ca = coreStopName(a);
-	const cb = coreStopName(b);
-	if (!ca || !cb) return false;
-	return ca === cb || ca.includes(cb) || cb.includes(ca);
+	const ranked = [...stops]
+		.map((stop) => ({
+			stop,
+			score: scoreStopNameMatch(
+				{
+					name: stop.name,
+					kind: stop.kind,
+					code: stop.code,
+					systems: stop.systems,
+				},
+				query,
+			),
+		}))
+		.filter((x) => x.score > 0)
+		.sort((a, b) => b.score - a.score);
+	if (ranked.length === 0) return [];
+	// Prefer strong textual matches; never fall back to "any station".
+	const minScore = ranked[0].score >= 150 ? 100 : 40;
+	return ranked.filter((x) => x.score >= minScore).map((x) => x.stop);
 }
 
 function debugStop(stop: Stop): RoutePlanDebugStop {
@@ -248,7 +222,11 @@ export class RoutePlanner {
 						},
 					});
 				}
-				if (local.kind === "no_route") {
+				// Same-place rejection is definitive; other local misses fall through to live Croma.
+				if (
+					local.kind === "no_route" &&
+					/same place/i.test(local.reason)
+				) {
 					return withDebug(local);
 				}
 			}
@@ -297,6 +275,19 @@ export class RoutePlanner {
 		const destCoords = destination.point;
 		debug.originStops = originStops.map(debugStop);
 		debug.destStops = destStops.map(debugStop);
+
+		const samePointMeters = haversineDistance(
+			originCoords.latitude,
+			originCoords.longitude,
+			destCoords.latitude,
+			destCoords.longitude,
+		);
+		if (samePointMeters < SAME_POINT_METERS) {
+			return withDebug({
+				kind: "no_route",
+				reason: `Origin and destination resolved to the same place (${originCoords.name} ≈ ${destCoords.name}, ${Math.round(samePointMeters)}m apart). Try a more specific station name.`,
+			});
+		}
 
 		const directRoute = await this.findDirectRoute(
 			originStops,
@@ -459,6 +450,9 @@ export class RoutePlanner {
 		}
 
 		const ranked = rankStopsByQuery(matches, query).slice(0, 10);
+		if (ranked.length === 0) {
+			return null;
+		}
 		const enriched = await this.enrichStopsWithPlatforms(ranked);
 		const primary = enriched[0];
 		return {

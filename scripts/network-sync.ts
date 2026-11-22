@@ -49,6 +49,7 @@ OPTIONS:
   --rate-ms <n>          Delay between API calls (default 200)
   --max-pages <n>        Cap list pagination (useful for smoke/dry-run)
   --max-route-details <n> Cap route/v1 detail fetches
+  --max-shards <n>       Cap geo/kind stop shards (smoke only)
   --help                 Show this help
 
 ENV:
@@ -97,6 +98,10 @@ async function main(): Promise<void> {
 			typeof flags["max-route-details"] === "string"
 				? parseInt(flags["max-route-details"], 10)
 				: undefined,
+		maxShards:
+			typeof flags["max-shards"] === "string"
+				? parseInt(flags["max-shards"], 10)
+				: undefined,
 		onProgress: (event) => {
 			if (!flags.json) {
 				console.error(`[${event.phase}] ${event.message}`);
@@ -113,9 +118,17 @@ async function main(): Promise<void> {
 					? `Dry-run ok — would write ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes (${result.api_calls} API calls)`
 					: `Synced ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes → ${result.paths?.snapshot}`,
 			);
+			if (result.stops_pagination_verified === false) {
+				console.error(
+					"WARNING: stops pagination was not fully verified (check warnings).",
+				);
+			}
 		} else {
 			console.error("Sync failed:");
 			for (const err of result.errors) console.error(`  - ${err}`);
+		}
+		for (const warn of result.warnings) {
+			console.error(`WARNING: ${warn}`);
 		}
 	}
 

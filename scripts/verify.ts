@@ -344,12 +344,13 @@ async function runMCPTests(
 		async function runTool(
 			tool: string,
 			fn: () => Promise<ToolResultLike>,
+			options?: { multimodal?: boolean; portalCalle100?: boolean },
 		): Promise<ToolResultLike | null> {
 			try {
 				const output = await fn();
 				results.push({
 					tool,
-					success: isSuccessfulToolResultFor(tool, output),
+					success: isSuccessfulToolResultFor(tool, output, options),
 					output,
 				});
 				return output;
@@ -394,13 +395,16 @@ async function runMCPTests(
 			tools.getServiceAlerts({ limit: 10 }),
 		);
 
-		await runTool("plan_route", () =>
-			tools.planRoute({
-				origin: "Portal Norte",
-				destination: "Calle 100",
-				maxTransfers: 1,
-				debug: verbose,
-			}),
+		await runTool(
+			"plan_route",
+			() =>
+				tools.planRoute({
+					origin: "Portal Norte",
+					destination: "Calle 100",
+					maxTransfers: 1,
+					debug: verbose,
+				}),
+			{ portalCalle100: true },
 		);
 
 		// Named multimodal smoke: address → neighborhood across systems.

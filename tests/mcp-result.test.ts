@@ -3,6 +3,7 @@ import {
 	isSuccessfulToolResult,
 	isSuccessfulPlanRouteResult,
 	isSuccessfulMultimodalPlanRouteResult,
+	isSuccessfulPortalCalle100Result,
 	isSuccessfulToolResultFor,
 } from "../src/lib/mcp/result";
 import liveNoRoute from "./__fixtures__/mcp-plan-route-no-stations.json";
@@ -65,6 +66,38 @@ describe("isSuccessfulPlanRouteResult", () => {
 				],
 			}),
 		).toBe(true);
+	});
+});
+
+describe("isSuccessfulPortalCalle100Result", () => {
+	it("accepts a plausible Portal → Calle 100 trunk ride", () => {
+		const ok = {
+			content: [
+				{
+					type: "text",
+					text:
+						"Route from Portal del Norte to Calle 100\nTotal time: ~25 minutes\n\nSteps:\n1. Take B10 (TransMilenio/troncal) from Portal del Norte to Calle 100 (~20 min)",
+				},
+			],
+		};
+		expect(isSuccessfulPortalCalle100Result(ok)).toBe(true);
+		expect(
+			isSuccessfulToolResultFor("plan_route", ok, { portalCalle100: true }),
+		).toBe(true);
+	});
+
+	it("rejects the false-green 21 Ángeles loop", () => {
+		expect(
+			isSuccessfulPortalCalle100Result({
+				content: [
+					{
+						type: "text",
+						text:
+							"Route from 21 Ángeles to 21 Ángeles\nTotal time: ~159 minutes\n\nSteps:\n1. Take B10 (TransMilenio/troncal) from 21 Ángeles to 21 Ángeles (~159 min)",
+					},
+				],
+			}),
+		).toBe(false);
 	});
 });
 

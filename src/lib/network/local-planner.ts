@@ -4,6 +4,7 @@ import {
 	looksLikeBogotaAddress,
 	looksLikeNeighborhood,
 } from "../geocode/bogota";
+import { scoreStopNameMatch } from "../routing/name-match";
 import type {
 	RoutePlan,
 	RoutePlanRequest,
@@ -18,27 +19,11 @@ import type { NetworkStop } from "./types";
 
 const DEFAULT_MAX_WALK = 800;
 const GEOCODED_WALK = 1200;
+const TRANSFER_PENALTY_MIN = 8;
+/** Reject plans whose resolved endpoints are essentially the same place. */
+const SAME_POINT_METERS = 120;
 
 type Point = { latitude: number; longitude: number; name: string };
-
-function normalize(name: string): string {
-	return name
-		.normalize("NFD")
-		.replace(/\p{M}/gu, "")
-		.toLowerCase()
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-function scoreName(stop: NetworkStop, query: string): number {
-	const q = normalize(query);
-	const name = normalize(stop.name);
-	let score = 0;
-	if (stop.kind === "station") score += 100;
-	if (name === q) score += 50;
-	else if (name.includes(q) || q.includes(name)) score += 20;
-	return score;
-}
 
 function nearbyStops(
 	stops: NetworkStop[],
@@ -54,7 +39,7 @@ function nearbyStops(
 		.filter((x) => x.d <= radiusM)
 		.sort((a, b) => a.d - b.d)
 		.map((x) => x.stop)
-		.slice(0, 20);
+		.slice(0, 25);
 }
 
 function resolveByName(
@@ -62,11 +47,28 @@ function resolveByName(
 	query: string,
 ): { point: Point; stops: NetworkStop[] } | null {
 	const ranked = [...stops]
-		.map((stop) => ({ stop, score: scoreName(stop, query) }))
+		.map((stop) => ({
+			stop,
+			score: scoreStopNameMatch(
+				{
+					name: stop.name,
+					kind: stop.kind,
+					code: stop.code,
+					systems: stop.systems,
+				},
+				query,
+			),
+		}))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score);
 	if (ranked.length === 0) return null;
-	const top = ranked.slice(0, 10).map((x) => x.stop);
+	// Prefer strong textual matches; never fall back to "any station".
+	const minScore = ranked[0].score >= 150 ? 100 : 40;
+	const top = ranked
+		.filter((x) => x.score >= minScore)
+		.slice(0, 10)
+		.map((x) => x.stop);
+	if (top.length === 0) return null;
 	const primary = top[0];
 	return {
 		point: {
@@ -307,6 +309,19 @@ export async function planRouteLocal(
 		};
 	}
 
+	const samePointMeters = haversineDistance(
+		origin.point.latitude,
+		origin.point.longitude,
+		destination.point.latitude,
+		destination.point.longitude,
+	);
+	if (samePointMeters < SAME_POINT_METERS) {
+		return {
+			kind: "no_route",
+			reason: `Origin and destination resolved to the same place (${origin.point.name} ≈ ${destination.point.name}, ${Math.round(samePointMeters)}m apart). Try a more specific station name.`,
+		};
+	}
+
 	const direct = findDirectLocal(
 		network,
 		origin.stops,
@@ -403,6 +418,9 @@ function findDirectLocal(
 	for (const s of originStops) for (const id of expandIds(s, network.graph)) originIds.add(id);
 	for (const s of destStops) for (const id of expandIds(s, network.graph)) destIds.add(id);
 
+	let best: { cost: number; segments: Array<WalkSegment | RouteSegment> } | null =
+		null;
+
 	for (const routeId of candidateRouteIds(originStops, destStops, network.graph)) {
 		const meta = routeMeta(network, routeId);
 		if (!meta) continue;
@@ -416,6 +434,11 @@ function findDirectLocal(
 			const segments: Array<WalkSegment | RouteSegment> = [];
 			const walkIn = buildWalk(originPoint, board);
 			if (walkIn) segments.push(walkIn);
+			const transitMin = estimateMinutes(
+				pattern.offsets,
+				boardIdx,
+				alightIdx,
+			);
 			segments.push({
 				kind: "transit",
 				route: meta,
@@ -424,11 +447,7 @@ function findDirectLocal(
 				intermediateStops: pattern.stop_ids
 					.slice(boardIdx + 1, alightIdx)
 					.map((id) => stopPoint(network, id)),
-				estimatedMinutes: estimateMinutes(
-					pattern.offsets,
-					boardIdx,
-					alightIdx,
-				),
+				estimatedMinutes: transitMin,
 				geometry: null,
 			});
 			const walkOut = buildWalk(
@@ -441,10 +460,15 @@ function findDirectLocal(
 				},
 			);
 			if (walkOut) segments.push(walkOut);
-			return { segments };
+			let cost = 0;
+			for (const segment of segments) {
+				if (segment.kind === "walk") cost += segment.estimatedMinutes;
+				else cost += segment.estimatedMinutes ?? 0;
+			}
+			if (!best || cost < best.cost) best = { cost, segments };
 		}
 	}
-	return null;
+	return best ? { segments: best.segments } : null;
 }
 
 function findTransferLocal(
@@ -460,19 +484,57 @@ function findTransferLocal(
 	for (const s of destStops) for (const id of expandIds(s, network.graph)) destIds.add(id);
 
 	type Cand = {
-		score: number;
+		/** Lower is better: total minutes + transfer penalty. */
+		cost: number;
+		systems: number;
 		segments: Array<WalkSegment | RouteSegment | TransferSegment>;
 	};
-	let best: Cand | null = null;
+	const bestBox: { current: Cand | null } = { current: null };
 
-	for (const originStop of originStops.slice(0, 10)) {
+	const consider = (cand: Cand) => {
+		const best = bestBox.current;
+		if (
+			!best ||
+			cand.cost < best.cost - 0.5 ||
+			(Math.abs(cand.cost - best.cost) <= 0.5 && cand.systems > best.systems)
+		) {
+			bestBox.current = cand;
+		}
+	};
+
+	const sortConnecting = (ids: string[], firstSystem: string): string[] => {
+		return [...ids].sort((a, b) => {
+			const ma = routeMeta(network, a);
+			const mb = routeMeta(network, b);
+			const score = (m: typeof ma) => {
+				if (!m) return 0;
+				if (m.system !== firstSystem && m.system === "troncal") return 3;
+				if (m.system !== firstSystem) return 2;
+				return 1;
+			};
+			return score(mb) - score(ma);
+		});
+	};
+
+	for (const originStop of originStops.slice(0, 20)) {
 		const originExpanded = expandIds(originStop, network.graph);
 		const originRouteIds = new Set<string>();
 		for (const id of originExpanded) {
-			for (const rid of network.graph.stop_to_routes[id] ?? []) originRouteIds.add(rid);
+			for (const rid of network.graph.stop_to_routes[id] ?? []) {
+				originRouteIds.add(rid);
+			}
 		}
 
-		for (const routeId of [...originRouteIds].slice(0, 8)) {
+		// Prefer troncal / dual first so multimodal combos are explored early.
+		const orderedOriginRoutes = [...originRouteIds].sort((a, b) => {
+			const ma = routeMeta(network, a);
+			const mb = routeMeta(network, b);
+			const rank = (sys: string | undefined) =>
+				sys === "troncal" ? 0 : sys === "dual" ? 1 : sys === "alimentador" ? 2 : 3;
+			return rank(ma?.system) - rank(mb?.system);
+		});
+
+		for (const routeId of orderedOriginRoutes.slice(0, 16)) {
 			const meta1 = routeMeta(network, routeId);
 			if (!meta1) continue;
 			for (const pattern of network.graph.route_patterns[routeId] ?? []) {
@@ -480,7 +542,7 @@ function findTransferLocal(
 				if (boardIdx === -1) continue;
 				const step = Math.max(
 					1,
-					Math.floor((pattern.stop_ids.length - boardIdx) / 15),
+					Math.floor((pattern.stop_ids.length - boardIdx) / 20),
 				);
 				for (
 					let transferIdx = boardIdx + 1;
@@ -490,21 +552,42 @@ function findTransferLocal(
 					const transferId = pattern.stop_ids[transferIdx];
 					const hubs = [
 						{ id: transferId, meters: 0 },
-						...walkNeighbors(network.graph, transferId).slice(0, 6),
+						...walkNeighbors(network.graph, transferId).slice(0, 10),
 					];
 					for (const hub of hubs) {
-						const hubRoutes = (network.graph.stop_to_routes[hub.id] ?? []).filter(
-							(id) => id !== routeId,
-						);
-						for (const connectingId of hubRoutes.slice(0, 6)) {
+						const hubRouteIds = (
+							network.graph.stop_to_routes[hub.id] ?? []
+						).filter((id) => id !== routeId);
+						for (const platformId of network.graph.station_platforms[hub.id] ??
+							[]) {
+							for (const rid of network.graph.stop_to_routes[platformId] ?? []) {
+								if (rid !== routeId) hubRouteIds.push(rid);
+							}
+						}
+						const connecting = sortConnecting(
+							[...new Set(hubRouteIds)],
+							meta1.system,
+						).slice(0, 10);
+
+						for (const connectingId of connecting) {
 							const meta2 = routeMeta(network, connectingId);
 							if (!meta2) continue;
-							for (const pattern2 of network.graph.route_patterns[connectingId] ??
-								[]) {
-								const secondBoard = findIndex(
-									pattern2.stop_ids,
-									new Set([hub.id, ...(network.graph.station_platforms[hub.id] ?? [])]),
-								);
+							for (const pattern2 of network.graph.route_patterns[
+								connectingId
+							] ?? []) {
+								const hubIds = new Set<string>([
+									hub.id,
+									...(network.graph.station_platforms[hub.id] ?? []),
+								]);
+								const parent = network.graph.platform_station[hub.id];
+								if (parent) {
+									hubIds.add(parent);
+									for (const p of network.graph.station_platforms[parent] ??
+										[]) {
+										hubIds.add(p);
+									}
+								}
+								const secondBoard = findIndex(pattern2.stop_ids, hubIds);
 								const alightIdx = findIndex(pattern2.stop_ids, destIds);
 								if (
 									secondBoard === -1 ||
@@ -516,8 +599,14 @@ function findTransferLocal(
 
 								const board = stopPoint(network, pattern.stop_ids[boardIdx]);
 								const alight1 = stopPoint(network, transferId);
-								const board2 = stopPoint(network, pattern2.stop_ids[secondBoard]);
-								const alight2 = stopPoint(network, pattern2.stop_ids[alightIdx]);
+								const board2 = stopPoint(
+									network,
+									pattern2.stop_ids[secondBoard],
+								);
+								const alight2 = stopPoint(
+									network,
+									pattern2.stop_ids[alightIdx],
+								);
 								const segments: Array<
 									WalkSegment | RouteSegment | TransferSegment
 								> = [];
@@ -580,21 +669,19 @@ function findTransferLocal(
 								);
 								if (walkOut) segments.push(walkOut);
 
-								const systemsDiffer = meta1.system !== meta2.system ? 40 : 0;
-								const multimodal =
-									(meta1.system === "zonal_urbano" ||
-										meta1.system === "alimentador" ||
-										meta2.system === "zonal_urbano" ||
-										meta2.system === "alimentador") &&
-									(meta1.system === "troncal" || meta2.system === "troncal")
-										? 30
-										: 0;
-								const score =
-									systemsDiffer + multimodal - (leg1Min + leg2Min + transferWalk) / 5;
-								if (!best || score > best.score) {
-									best = { score, segments };
+								let total = 0;
+								for (const segment of segments) {
+									if (segment.kind === "walk") total += segment.estimatedMinutes;
+									else if (segment.kind === "transit")
+										total += segment.estimatedMinutes ?? 0;
+									else total += segment.walkMinutes;
 								}
-								if (best.score >= 80) return { segments: best.segments };
+								const systems = meta1.system === meta2.system ? 1 : 2;
+								consider({
+									cost: total + TRANSFER_PENALTY_MIN,
+									systems,
+									segments,
+								});
 							}
 						}
 					}
@@ -603,5 +690,7 @@ function findTransferLocal(
 		}
 	}
 
-	return best ? { segments: best.segments } : null;
+	return bestBox.current
+		? { segments: bestBox.current.segments }
+		: null;
 }

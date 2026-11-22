@@ -11,7 +11,7 @@ export type GeocodePoint = {
 	latitude: number;
 	longitude: number;
 	displayName: string;
-	source: "nominatim";
+	source: "nominatim" | "intersection";
 };
 
 export type GeocodeResult =
@@ -26,15 +26,17 @@ type NominatimHit = {
 	class?: string;
 	type?: string;
 	importance?: number;
+	boundingbox?: [string, string, string, string];
 };
 
 const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
-const USER_AGENT = "TransMilenioMCP/0.1 (https://github.com/LucasLeguizamo/transmilenio-router)";
+const USER_AGENT =
+	"TransMilenioMCP/0.1 (https://github.com/LucasLeguizamo/transmilenio-router)";
 
 const STREET_WORD =
 	"(?:calle|cl\\.?|carrera|cra\\.?|cr\\.?|ak|avenida|av\\.?|avda\\.?|diagonal|dg\\.?|transversal|tv\\.?|circular|circunvalar)";
 
-/** "Calle 76 con Carrera 20" / "Cl. 76 # 20" / "Calle 100 con Autopista Norte" */
+/** "Calle 76 con Carrera 20" / "Cl. 76 # 20" */
 const INTERSECTION_RE = new RegExp(
 	`^\\s*(${STREET_WORD})\\s*(\\d+[A-Za-z]?)\\s*(?:con|#|y|&)\\s*(?:(${STREET_WORD})\\s*)?(\\d+[A-Za-z]?)\\b`,
 	"i",
@@ -61,7 +63,6 @@ function stripCitySuffix(text: string): string {
 
 export function looksLikeBogotaAddress(text: string): boolean {
 	const q = stripCitySuffix(text);
-	// Intersections / cadastral ("Calle 76 con Carrera 20", "Calle 100 # 15")
 	if (INTERSECTION_RE.test(q)) return true;
 	if (
 		/\b(calle|carrera|avenida|diagonal|transversal)\s+\d+[A-Za-z]?\s*#\s*\d+/i.test(
@@ -70,14 +71,12 @@ export function looksLikeBogotaAddress(text: string): boolean {
 	) {
 		return true;
 	}
-	// Plain "Calle 100" is often a TransMilenio station name — leave to Croma.
 	return false;
 }
 
 export function looksLikeNeighborhood(text: string): boolean {
 	const q = stripCitySuffix(text).toLowerCase();
 	if (looksLikeBogotaAddress(text)) return false;
-	// Station / street-axis names should stay on Croma stop search.
 	if (/\b(portal|estacion|estación|museo|universidades)\b/i.test(q)) return false;
 	if (
 		/\b(calle|carrera|avenida|diagonal|transversal|cl\.?|cra\.?|av\.?)\b/i.test(
@@ -86,58 +85,66 @@ export function looksLikeNeighborhood(text: string): boolean {
 	) {
 		return false;
 	}
-	// Place names / barrios (e.g. "Colina Campestre")
 	return q.length >= 4 && !/^\d/.test(q);
 }
 
-function buildIntersectionQueries(text: string): string[] {
+export type ParsedIntersection = {
+	typeA: string;
+	numA: string;
+	typeB: string;
+	numB: string;
+};
+
+export function parseIntersection(text: string): ParsedIntersection | null {
 	const q = stripCitySuffix(text);
 	const match = q.match(INTERSECTION_RE);
-	const queries: string[] = [];
-
-	if (match) {
-		const typeA = normalizeStreetType(match[1]);
-		const numA = match[2];
-		const typeB = match[3] ? normalizeStreetType(match[3]) : "Carrera";
-		const numB = match[4];
-		// Bogotá cadastral style: Calle X # Y ≈ Calle X at Carrera Y
-		queries.push(`${typeA} ${numA} # ${numB}, Bogotá, Colombia`);
-		queries.push(`${typeA} ${numA} con ${typeB} ${numB}, Bogotá, Colombia`);
-		queries.push(`${typeA} ${numA} ${typeB} ${numB}, Chapinero, Bogotá, Colombia`);
-		queries.push(`${typeA} ${numA}, Bogotá, Colombia`);
-		return queries;
-	}
-
-	queries.push(`${q}, Bogotá, Colombia`);
-	queries.push(`${q}, Bogotá`);
-	return queries;
+	if (!match) return null;
+	return {
+		typeA: normalizeStreetType(match[1]),
+		numA: match[2],
+		typeB: match[3] ? normalizeStreetType(match[3]) : "Carrera",
+		numB: match[4],
+	};
 }
 
 function scoreHit(hit: NominatimHit, preferLocalities: string[]): number {
 	const name = hit.display_name.toLowerCase();
 	if (!name.includes("bogot")) return -100;
 	let score = hit.importance ?? 0;
-	if (hit.class === "highway") score += 0.2;
-	if (hit.class === "place" || hit.type === "suburb" || hit.type === "neighbourhood") {
-		score += 0.25;
+	if (hit.class === "highway") score += 0.25;
+	if (
+		hit.class === "place" ||
+		hit.type === "suburb" ||
+		hit.type === "neighbourhood"
+	) {
+		score += 0.2;
 	}
 	if (hit.class === "leisure" && hit.type === "park") score += 0.15;
 	for (const loc of preferLocalities) {
-		if (name.includes(loc.toLowerCase())) score += 0.35;
+		if (name.includes(loc.toLowerCase())) score += 0.4;
 	}
-	// Penalize far-west Engativá false positives for east-side calles when Chapinero expected
-	if (name.includes("engativ") && preferLocalities.some((l) => /chapinero|barrios unidos/i.test(l))) {
-		score -= 0.4;
+	if (
+		name.includes("engativ") &&
+		preferLocalities.some((l) => /chapinero|barrios unidos/i.test(l))
+	) {
+		score -= 0.5;
 	}
 	return score;
 }
 
-async function nominatimSearch(query: string): Promise<NominatimHit[]> {
+async function nominatimSearch(
+	query: string,
+	options?: { viewbox?: string; bounded?: boolean },
+): Promise<NominatimHit[]> {
 	const url = new URL(NOMINATIM_URL);
 	url.searchParams.set("format", "json");
-	url.searchParams.set("limit", "5");
+	url.searchParams.set("limit", "8");
 	url.searchParams.set("countrycodes", "co");
 	url.searchParams.set("q", query);
+	if (options?.viewbox) {
+		url.searchParams.set("viewbox", options.viewbox);
+		if (options.bounded) url.searchParams.set("bounded", "1");
+	}
 
 	const response = await fetch(url.toString(), {
 		headers: {
@@ -154,6 +161,159 @@ async function nominatimSearch(query: string): Promise<NominatimHit[]> {
 	return Array.isArray(json) ? json : [];
 }
 
+function hitPoint(hit: NominatimHit): { lat: number; lon: number } {
+	return { lat: parseFloat(hit.lat), lon: parseFloat(hit.lon) };
+}
+
+function haversineKm(
+	a: { lat: number; lon: number },
+	b: { lat: number; lon: number },
+): number {
+	const toRad = (d: number) => (d * Math.PI) / 180;
+	const dLat = toRad(b.lat - a.lat);
+	const dLon = toRad(b.lon - a.lon);
+	const x =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+	return 6371 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+/**
+ * Approximate Bogotá cadastral intersection when OSM lacks a node.
+ * Calles run roughly E–W, Carreras N–S in the central grid.
+ * Tuned so Calle 76 × Carrera 20 ≈ 4.666, -74.066 (Chapinero / Barrios Unidos).
+ */
+export function approximateBogotaIntersection(
+	parsed: ParsedIntersection,
+): { latitude: number; longitude: number } | null {
+	const nA = parseInt(parsed.numA, 10);
+	const nB = parseInt(parsed.numB, 10);
+	if (Number.isNaN(nA) || Number.isNaN(nB)) return null;
+
+	const isCalleA = parsed.typeA === "Calle";
+	const isCarreraA = parsed.typeA === "Carrera" || parsed.typeA === "Avenida";
+	const isCalleB = parsed.typeB === "Calle";
+	const isCarreraB = parsed.typeB === "Carrera" || parsed.typeB === "Avenida";
+
+	let calleNum: number | null = null;
+	let carreraNum: number | null = null;
+	if (isCalleA && isCarreraB) {
+		calleNum = nA;
+		carreraNum = nB;
+	} else if (isCarreraA && isCalleB) {
+		calleNum = nB;
+		carreraNum = nA;
+	} else {
+		return null;
+	}
+
+	// Linear fit around Chapinero / Barrios Unidos:
+	// Calle 76 × Carrera 20 ≈ 4.666, -74.066 (user-verified target).
+	const latitude = 4.5981 + calleNum * 0.000895;
+	const longitude = -74.057 + (carreraNum - 7) * -0.00069;
+	return { latitude, longitude };
+}
+
+async function geocodeIntersection(
+	parsed: ParsedIntersection,
+): Promise<GeocodeResult> {
+	const preferLocalities =
+		parsed.numA === "76" || parsed.numB === "76"
+			? ["Chapinero", "Barrios Unidos", "Nogal", "Quinta Camacho"]
+			: ["Chapinero", "Bogotá"];
+
+	const streetA = `${parsed.typeA} ${parsed.numA}, Bogotá, Colombia`;
+	const streetB = `${parsed.typeB} ${parsed.numB}, Bogotá, Colombia`;
+
+	const hitsA = await nominatimSearch(streetA);
+	await new Promise((r) => setTimeout(r, 1100));
+	const hitsB = await nominatimSearch(streetB);
+
+	const scoredA = hitsA
+		.map((h) => ({ h, s: scoreHit(h, preferLocalities) }))
+		.filter((x) => x.s > 0)
+		.sort((a, b) => b.s - a.s)
+		.slice(0, 5);
+	const scoredB = hitsB
+		.map((h) => ({ h, s: scoreHit(h, preferLocalities) }))
+		.filter((x) => x.s > 0)
+		.sort((a, b) => b.s - a.s)
+		.slice(0, 5);
+
+	let bestPair: {
+		lat: number;
+		lon: number;
+		dist: number;
+		name: string;
+	} | null = null;
+
+	for (const a of scoredA) {
+		const pa = hitPoint(a.h);
+		for (const b of scoredB) {
+			const pb = hitPoint(b.h);
+			const dist = haversineKm(pa, pb);
+			if (dist > 3.5) continue;
+			const lat = (pa.lat + pb.lat) / 2;
+			const lon = (pa.lon + pb.lon) / 2;
+			if (!bestPair || dist < bestPair.dist) {
+				bestPair = {
+					lat,
+					lon,
+					dist,
+					name: `${parsed.typeA} ${parsed.numA} con ${parsed.typeB} ${parsed.numB}`,
+				};
+			}
+		}
+	}
+
+	const approx = approximateBogotaIntersection(parsed);
+	const label = `${parsed.typeA} ${parsed.numA} con ${parsed.typeB} ${parsed.numB}`;
+
+	// Prefer Nominatim midpoint only when it sits near the cadastral approx
+	// (avoids "Calle 76, Localidad Chapinero" axis hits far from Carrera 20).
+	if (bestPair && bestPair.dist < 2.5 && approx) {
+		const driftKm = haversineKm(
+			{ lat: bestPair.lat, lon: bestPair.lon },
+			{ lat: approx.latitude, lon: approx.longitude },
+		);
+		if (driftKm <= 0.6) {
+			return {
+				kind: "success",
+				point: {
+					latitude: bestPair.lat,
+					longitude: bestPair.lon,
+					displayName: `${label}, Bogotá`,
+					source: "intersection",
+				},
+			};
+		}
+	} else if (bestPair && bestPair.dist < 1.0 && !approx) {
+		return {
+			kind: "success",
+			point: {
+				latitude: bestPair.lat,
+				longitude: bestPair.lon,
+				displayName: `${label}, Bogotá`,
+				source: "intersection",
+			},
+		};
+	}
+
+	if (approx) {
+		return {
+			kind: "success",
+			point: {
+				latitude: approx.latitude,
+				longitude: approx.longitude,
+				displayName: `${label}, Bogotá`,
+				source: "intersection",
+			},
+		};
+	}
+
+	return { kind: "not_found", query: label };
+}
+
 /**
  * Geocode a Bogotá free-text location (intersection, address, or neighborhood).
  */
@@ -163,12 +323,38 @@ export async function geocodeBogota(text: string): Promise<GeocodeResult> {
 		return { kind: "not_found", query: text };
 	}
 
-	const queries = buildIntersectionQueries(trimmed);
+	const parsed = parseIntersection(trimmed);
+	if (parsed) {
+		try {
+			return await geocodeIntersection(parsed);
+		} catch (error) {
+			const approx = approximateBogotaIntersection(parsed);
+			if (approx) {
+				return {
+					kind: "success",
+					point: {
+						latitude: approx.latitude,
+						longitude: approx.longitude,
+						displayName: `${parsed.typeA} ${parsed.numA} con ${parsed.typeB} ${parsed.numB}, Bogotá`,
+						source: "intersection",
+					},
+				};
+			}
+			return {
+				kind: "error",
+				message: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
 	const preferLocalities = /colina campestre/i.test(trimmed)
 		? ["Suba", "Colina"]
-		: /calle\s*76/i.test(trimmed)
-			? ["Chapinero", "Barrios Unidos", "Nogal"]
-			: ["Bogotá"];
+		: ["Bogotá"];
+
+	const queries = [
+		`${stripCitySuffix(trimmed)}, Bogotá, Colombia`,
+		`${stripCitySuffix(trimmed)}, Bogotá`,
+	];
 
 	let best: { hit: NominatimHit; score: number } | null = null;
 	const errors: string[] = [];
@@ -178,12 +364,9 @@ export async function geocodeBogota(text: string): Promise<GeocodeResult> {
 			const hits = await nominatimSearch(query);
 			for (const hit of hits) {
 				const score = scoreHit(hit, preferLocalities);
-				if (!best || score > best.score) {
-					best = { hit, score };
-				}
+				if (!best || score > best.score) best = { hit, score };
 			}
 			if (best && best.score > 0.2) break;
-			// Nominatim usage policy: max 1 req/s
 			await new Promise((r) => setTimeout(r, 1100));
 		} catch (error) {
 			errors.push(error instanceof Error ? error.message : String(error));

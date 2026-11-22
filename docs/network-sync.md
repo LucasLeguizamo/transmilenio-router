@@ -21,7 +21,16 @@ pnpm network:sync --help
 | `--rate-ms` | Delay between API calls (default `200`) |
 | `--max-pages` / `--max-route-details` | Caps for smoke tests |
 
-Sync is **idempotent** (re-run safe) and **resumable** via `data/network/sync-state.json`. It pages `stops-search` and `routes-search` (every `system`), then `route/v1` for ordered patterns.
+Sync is **idempotent** (re-run safe) and **resumable** via `data/network/sync-state.json`.
+
+Croma’s OpenAPI documents that `stops-search` / `routes-search` `total` is counted up to **1000** (`total_is_exact: false` when there are more). Unfiltered paging alone therefore stops at ~1000. This sync:
+
+1. Shards stops by `kind` (station/stop) and overlapping Bogotá geo boxes (`latitude`/`longitude`/`radius_m`)
+2. Lists routes per `system`, then fetches `route/v1` patterns
+3. **Backfills** any pattern-referenced stop id via `stop/v1` (stub from pattern coords if missing)
+4. **Fails loudly** if final stop count is still ≤1000 or an unverified multiple of 1000
+
+Use `--no-resume` after upgrading the syncer so an old capped state is not reused.
 
 ## What gets written
 
