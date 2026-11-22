@@ -76,19 +76,20 @@ export type NetworkGraph = {
 };
 
 export type SyncPhase =
-	| "stops"
 	| "routes_list"
 	| "routes_detail"
-	| "stops_backfill"
 	| "build"
-	| "done";
+	| "done"
+	/** Legacy phases from geo-shard syncer — migrated to routes_list on load. */
+	| "stops"
+	| "stops_backfill";
 
 export type SyncState = {
-	version: 1;
+	/** v2 = route-first sync (stops from pattern embeds). */
+	version: 1 | 2;
 	updated_at: string;
 	phase: SyncPhase;
 	stops_page: number;
-	/** Geographic shard index for stops-search (Croma caps unfiltered totals at 1000). */
 	stops_shard_index: number;
 	routes_system_index: number;
 	routes_page: number;
@@ -101,8 +102,11 @@ export type SyncState = {
 	as_of: string | null;
 	errors: string[];
 	warnings: string[];
-	/** True only when every stop shard reported total_is_exact or was exhausted by empty pages. */
 	stops_pagination_verified: boolean;
+	/** Network calls used in the current sync process (informational). */
+	api_calls?: number;
+	/** When true, stops were built from route patterns (route-first). */
+	stops_from_patterns?: boolean;
 };
 
 export const NetworkSnapshotSchema = z.object({

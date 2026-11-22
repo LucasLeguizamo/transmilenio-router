@@ -1,8 +1,15 @@
-import type { CromaClient } from "../croma/client";
-import type { Route, Stop, TransitSystem } from "../croma/types";
+import {
+	BillingError,
+	BudgetExceededError,
+	type CromaClient,
+} from "../croma/client";
+import { CROMA_LIST_PER_PAGE, DEFAULT_SYNC_MAX_CALLS } from "../croma/paths";
+import type { Route, TransitSystem } from "../croma/types";
 import { buildNetworkGraph } from "./build-graph";
+import { ALL_SYSTEMS } from "./sync-constants";
 import {
 	clearSyncState,
+	loadSnapshot,
 	loadSyncState,
 	saveGraph,
 	saveSnapshot,
@@ -16,46 +23,21 @@ import {
 	type SyncState,
 } from "./types";
 
-export const ALL_SYSTEMS: TransitSystem[] = [
-	"troncal",
-	"alimentador",
-	"dual",
-	"zonal_urbano",
-	"zonal_complementario",
-	"zonal_especial",
-	"transmicable",
-];
-
-/**
- * Croma stops-search / routes-search: `total` is counted up to 1000;
- * `total_is_exact` is false when there are more matches (OpenAPI).
- * Unfiltered paging alone therefore cannot ingest the full network.
- */
-const CROMA_SEARCH_TOTAL_CAP = 1000;
-
-/** Bogotá bounding box for overlapping proximity shards. */
-const BOGOTA_BOUNDS = {
-	minLat: 4.45,
-	maxLat: 4.84,
-	minLon: -74.25,
-	maxLon: -74.01,
-};
-const GEO_STEP = 0.035; // ~3.9 km
-const GEO_RADIUS_M = 2800;
+export { ALL_SYSTEMS } from "./sync-constants";
 
 export type SyncOptions = {
 	client: CromaClient;
-	/** Delay between API calls (ms). Default 200. */
+	/** Delay between API calls (ms). Default 50 (cache hits are instant). */
 	rateMs?: number;
 	/** Resume from sync-state.json when true (default). */
 	resume?: boolean;
 	dryRun?: boolean;
-	/** Cap pages for dry-run / testing. */
+	/** Cap list pagination (smoke). */
 	maxPages?: number;
-	/** Cap route detail fetches for dry-run / testing. */
+	/** Cap route detail fetches (smoke). */
 	maxRouteDetails?: number;
-	/** Cap geographic shards for dry-run / testing. */
-	maxShards?: number;
+	/** Hard network-call budget (default DEFAULT_SYNC_MAX_CALLS). */
+	maxCalls?: number;
 	onProgress?: (event: SyncProgressEvent) => void;
 };
 
@@ -67,8 +49,7 @@ export type SyncProgressEvent = {
 		routes?: number;
 		routeDetailsDone?: number;
 		routeDetailsPending?: number;
-		backfillDone?: number;
-		backfillPending?: number;
+		apiCalls?: number;
 	};
 };
 
@@ -82,48 +63,18 @@ export type SyncResult = {
 	warnings: string[];
 	resumed: boolean;
 	api_calls: number;
-	stops_pagination_verified?: boolean;
+	budget?: { maxCalls: number | null; used: number; remaining: number | null };
+	stopped_reason?:
+		| "complete"
+		| "budget"
+		| "billing"
+		| "error"
+		| "dry_run_cap";
+	stops_from_patterns?: boolean;
 };
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function compactStop(stop: Stop): NetworkStop {
-	return {
-		id: stop.stop_id,
-		code: stop.code,
-		name: stop.name,
-		kind: stop.kind,
-		lat: stop.latitude,
-		lon: stop.longitude,
-		parent: stop.parent_station,
-		platforms: stop.platforms ?? [],
-		systems: stop.systems ?? [],
-		route_ids: stop.route_ids,
-		route_codes: stop.route_codes,
-	};
-}
-
-function compactStopFromPattern(args: {
-	id: string;
-	name: string | null;
-	lat: number | null;
-	lon: number | null;
-}): NetworkStop {
-	return {
-		id: args.id,
-		code: null,
-		name: args.name ?? args.id,
-		kind: "stop",
-		lat: args.lat ?? 0,
-		lon: args.lon ?? 0,
-		parent: null,
-		platforms: [],
-		systems: [],
-		route_ids: [],
-		route_codes: [],
-	};
 }
 
 function compactRoute(route: Route): NetworkRoute {
@@ -147,40 +98,71 @@ function compactRoute(route: Route): NetworkRoute {
 	};
 }
 
-function bogotaGeoShards(): Array<{
-	latitude: number;
-	longitude: number;
-	radius_m: number;
-	label: string;
-}> {
-	const shards: Array<{
-		latitude: number;
-		longitude: number;
-		radius_m: number;
-		label: string;
-	}> = [];
-	for (let lat = BOGOTA_BOUNDS.minLat; lat <= BOGOTA_BOUNDS.maxLat; lat += GEO_STEP) {
-		for (
-			let lon = BOGOTA_BOUNDS.minLon;
-			lon <= BOGOTA_BOUNDS.maxLon;
-			lon += GEO_STEP
-		) {
-			shards.push({
-				latitude: Number(lat.toFixed(5)),
-				longitude: Number(lon.toFixed(5)),
-				radius_m: GEO_RADIUS_M,
-				label: `geo:${lat.toFixed(3)},${lon.toFixed(3)}`,
-			});
+/**
+ * Build the stop index from route pattern embeds (no stops-search).
+ */
+export function stopsFromRoutes(routes: NetworkRoute[]): NetworkStop[] {
+	const byId = new Map<string, NetworkStop>();
+
+	for (const route of routes) {
+		for (const pattern of route.patterns) {
+			for (const ps of pattern.stops) {
+				const existing = byId.get(ps.id);
+				if (existing) {
+					if (!existing.route_ids.includes(route.id)) {
+						existing.route_ids.push(route.id);
+					}
+					if (
+						route.code &&
+						!existing.route_codes.includes(route.code)
+					) {
+						existing.route_codes.push(route.code);
+					}
+					const sys = String(route.system);
+					if (!existing.systems.includes(sys)) {
+						existing.systems.push(sys);
+					}
+					if (
+						(existing.lat === 0 || existing.lon === 0) &&
+						ps.lat != null &&
+						ps.lon != null
+					) {
+						existing.lat = ps.lat;
+						existing.lon = ps.lon;
+					}
+					if (
+						(!existing.name || existing.name === existing.id) &&
+						ps.name
+					) {
+						existing.name = ps.name;
+					}
+					continue;
+				}
+				byId.set(ps.id, {
+					id: ps.id,
+					code: null,
+					name: ps.name ?? ps.id,
+					kind: "stop",
+					lat: ps.lat ?? 0,
+					lon: ps.lon ?? 0,
+					parent: null,
+					platforms: [],
+					systems: [String(route.system)],
+					route_ids: [route.id],
+					route_codes: route.code ? [route.code] : [],
+				});
+			}
 		}
 	}
-	return shards;
+
+	return [...byId.values()];
 }
 
 function emptyState(): SyncState {
 	return {
-		version: 1,
+		version: 2,
 		updated_at: new Date().toISOString(),
-		phase: "stops",
+		phase: "routes_list",
 		stops_page: 1,
 		stops_shard_index: 0,
 		routes_system_index: 0,
@@ -194,55 +176,96 @@ function emptyState(): SyncState {
 		as_of: null,
 		errors: [],
 		warnings: [],
-		stops_pagination_verified: false,
+		stops_pagination_verified: true,
+		api_calls: 0,
+		stops_from_patterns: true,
 	};
 }
 
 function migrateState(raw: SyncState): SyncState {
-	return {
-		...emptyState(),
+	const base = emptyState();
+	const merged: SyncState = {
+		...base,
 		...raw,
-		stops_shard_index: raw.stops_shard_index ?? 0,
-		backfill_ids: raw.backfill_ids ?? [],
-		backfill_index: raw.backfill_index ?? 0,
+		version: 2,
+		stops_from_patterns: true,
 		warnings: raw.warnings ?? [],
-		stops_pagination_verified: raw.stops_pagination_verified ?? false,
 	};
+
+	// Legacy geo-shard / stop-backfill states are expensive — restart listing
+	// but keep any route_ids / route details already paid for.
+	if (raw.phase === "stops" || raw.phase === "stops_backfill") {
+		merged.phase = "routes_list";
+		merged.routes_system_index = 0;
+		merged.routes_page = 1;
+		merged.warnings = [
+			...merged.warnings,
+			"Migrated from legacy stop-shard sync state to route-first (v2).",
+		];
+	}
+	return merged;
 }
 
 /**
- * Fetch the full TransMilenio/SITP network from Croma into a local snapshot + graph.
- * Idempotent and resumable via data/network/sync-state.json.
+ * Sync the local network using a route-first strategy:
+ * 1) routes-search per system (max page size)
+ * 2) route/v1 for each id (patterns embed stops)
+ * 3) build stops from embeds — no geographic stop shards, no stop/v1 spam
  *
  * Error examples:
- * - Missing CROMA_API_KEY → caller should fail before invoke
- * - HTTP 429 → backs off and retries; recorded in errors if exhausted
- * - Stops capped at 1000 without sharding → hard error / loud warning
+ * - HTTP 402 billing_error → terminal stop, message includes reset date
+ * - BudgetExceededError → progress saved; resume with higher --max-calls
+ * - HTTP 429 → exponential backoff inside the client
  */
 export async function syncNetwork(options: SyncOptions): Promise<SyncResult> {
-	const rateMs = options.rateMs ?? 200;
+	const rateMs = options.rateMs ?? 50;
 	const resume = options.resume !== false;
 	const dryRun = options.dryRun === true;
 	const maxPages = options.maxPages;
 	const maxRouteDetails = options.maxRouteDetails;
-	const maxShards = options.maxShards;
-	let apiCalls = 0;
+	const maxCalls = options.maxCalls ?? DEFAULT_SYNC_MAX_CALLS;
 	const errors: string[] = [];
 	const warnings: string[] = [];
+	let stoppedReason: SyncResult["stopped_reason"] = "complete";
+
+	options.client.setMaxCalls(maxCalls);
 
 	let state: SyncState = emptyState();
 	if (resume) {
 		const loaded = loadSyncState();
 		if (loaded) state = migrateState(loaded);
 	}
-	const resumed =
-		state.phase !== "stops" ||
-		state.stops_page > 1 ||
-		state.stops_shard_index > 0 ||
-		state.stops.length > 0;
 
-	const progress = (message: string, counts?: SyncProgressEvent["counts"]) => {
-		options.onProgress?.({ phase: state.phase, message, counts });
+	// Seed route details already in a prior snapshot so we don't refetch them
+	// when sync-state was cleared but snapshot + HTTP cache remain.
+	if (state.routes.length === 0) {
+		const existing = loadSnapshot();
+		if (existing && existing.routes.length > 0 && state.route_ids.length === 0) {
+			warnings.push(
+				`Loaded ${existing.routes.length} routes from existing snapshot as baseline (incremental).`,
+			);
+		}
+	}
+
+	const resumed =
+		state.phase !== "routes_list" ||
+		state.routes_page > 1 ||
+		state.routes_system_index > 0 ||
+		state.route_ids_done.length > 0 ||
+		state.routes.length > 0;
+
+	const progress = (
+		message: string,
+		counts?: SyncProgressEvent["counts"],
+	) => {
+		options.onProgress?.({
+			phase: state.phase,
+			message,
+			counts: {
+				...counts,
+				apiCalls: options.client.getNetworkCallCount(),
+			},
+		});
 	};
 
 	const throttle = async () => {
@@ -251,512 +274,357 @@ export async function syncNetwork(options: SyncOptions): Promise<SyncResult> {
 
 	const persist = () => {
 		state.updated_at = new Date().toISOString();
+		state.api_calls = options.client.getNetworkCallCount();
 		if (!dryRun) saveSyncState(state);
 	};
 
-	const callApi = async <
-		T extends { kind: string; status?: number; message?: string },
-	>(
-		label: string,
-		fn: () => Promise<T>,
-	): Promise<T | null> => {
-		for (let attempt = 0; attempt < 4; attempt++) {
-			apiCalls += 1;
-			try {
-				const result = await fn();
-				if (result.kind === "error" && result.status === 429 && attempt < 3) {
-					await sleep(rateMs * Math.pow(2, attempt + 2));
-					continue;
-				}
-				return result;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (attempt === 3) {
-					errors.push(`${label}: ${message}`);
-					return null;
-				}
-				await sleep(rateMs * Math.pow(2, attempt + 1));
-			}
-		}
-		return null;
+	const budgetSnapshot = () => options.client.getBudget();
+
+	const failBilling = (message: string): SyncResult => {
+		stoppedReason = "billing";
+		errors.push(message);
+		persist();
+		return {
+			success: false,
+			dry_run: dryRun,
+			errors: [...errors, ...state.errors],
+			warnings: [...new Set([...state.warnings, ...warnings])],
+			resumed,
+			api_calls: options.client.getNetworkCallCount(),
+			budget: budgetSnapshot(),
+			stopped_reason: "billing",
+			stops_from_patterns: true,
+		};
 	};
 
-	const stopIds = () => new Set(state.stops.map((s) => s.id));
-
-	const addStops = (stops: Stop[]) => {
-		const ids = stopIds();
-		let added = 0;
-		for (const stop of stops) {
-			if (ids.has(stop.stop_id)) continue;
-			ids.add(stop.stop_id);
-			state.stops.push(compactStop(stop));
-			added += 1;
-		}
-		return added;
-	};
-
-	type PageResult = {
-		exact: boolean;
-		pagesFetched: number;
-		hitCap: boolean;
-	};
-
-	const fetchStopShard = async (params: {
-		label: string;
-		kind?: "" | "station" | "stop";
-		latitude?: number;
-		longitude?: number;
-		radius_m?: number;
-	}): Promise<PageResult> => {
-		let page = 1;
-		let totalPages = Number.POSITIVE_INFINITY;
-		let exact = true;
-		let hitCap = false;
-		let pagesFetched = 0;
-		let emptyStreak = 0;
-
-		while (page <= totalPages) {
-			if (maxPages != null && pagesFetched >= maxPages) break;
-			await throttle();
-			const result = await callApi(
-				`stops-search ${params.label} p${page}`,
-				async () =>
-					options.client.searchStops({
-						kind: params.kind,
-						latitude: params.latitude,
-						longitude: params.longitude,
-						radius_m: params.radius_m,
-						page,
-						per_page: 100,
-					}),
-			);
-			if (!result || result.kind === "error") {
-				errors.push(
-					`stops-search ${params.label} p${page}: ${result && result.kind === "error" ? result.message : "failed"}`,
-				);
-				if (result && result.kind === "error" && result.status === 429) {
-					await sleep(rateMs * 8);
-					continue;
-				}
-				break;
-			}
-
-			const data = result.data.data;
-			state.as_of = data.as_of ?? state.as_of;
-			totalPages = Math.max(data.total_pages || 1, 1);
-			if (data.total_is_exact === false) {
-				exact = false;
-				hitCap = true;
-			}
-			if (data.total >= CROMA_SEARCH_TOTAL_CAP && data.total_is_exact === false) {
-				hitCap = true;
-			}
-
-			const added = addStops(data.stops);
-			pagesFetched += 1;
-			if (data.stops.length === 0) {
-				emptyStreak += 1;
-				if (emptyStreak >= 2) break;
-			} else {
-				emptyStreak = 0;
-			}
-
-			page += 1;
-			state.stops_page = page;
-			persist();
-			progress(
-				`stops ${params.label} page ${page - 1}/${totalPages} (+${added})`,
-				{ stops: state.stops.length },
-			);
-
-			// OpenAPI page maximum is 1000; stop before invalid pages.
-			if (page > 1000) break;
-		}
-
-		return { exact, pagesFetched, hitCap };
-	};
-
-	// --- Phase: stops (kind shards + geographic shards) ---
-	if (state.phase === "stops") {
-		progress("Fetching stops (sharded; Croma caps unfiltered total at 1000)");
-
-		const kindShards: Array<{ kind: "" | "station" | "stop"; label: string }> = [
-			{ kind: "station", label: "kind:station" },
-			{ kind: "stop", label: "kind:stop" },
-		];
-		const geoShards = bogotaGeoShards().flatMap((g) => [
-			{ ...g, kind: "stop" as const, label: `${g.label}:stop` },
-			{ ...g, kind: "station" as const, label: `${g.label}:station` },
-		]);
-
-		const allShards: Array<{
-			label: string;
-			kind?: "" | "station" | "stop";
-			latitude?: number;
-			longitude?: number;
-			radius_m?: number;
-		}> = [
-			...kindShards,
-			...geoShards.map((g) => ({
-				label: g.label,
-				kind: g.kind,
-				latitude: g.latitude,
-				longitude: g.longitude,
-				radius_m: g.radius_m,
-			})),
-		];
-
-		let shardsComplete = true;
-		let startIdx = state.stops_shard_index;
-		for (let i = startIdx; i < allShards.length; i++) {
-			if (maxShards != null && i >= maxShards) {
-				warnings.push(
-					`Stopped after ${maxShards} shards (--max-shards); pagination not fully verified`,
-				);
-				shardsComplete = false;
-				break;
-			}
-			const shard = allShards[i];
-			state.stops_shard_index = i;
-			state.stops_page = 1;
-			persist();
-			const result = await fetchStopShard(shard);
-			// Unfiltered kind shards are expected to hit the 1000 floor; geo shards continue.
-			if (result.hitCap && !shard.latitude) {
-				warnings.push(
-					`Shard ${shard.label} hit Croma ${CROMA_SEARCH_TOTAL_CAP}-match floor (total_is_exact=false); continuing with geographic shards`,
-				);
-				console.error(`WARNING: ${warnings[warnings.length - 1]}`);
-			}
-		}
-
-		if (shardsComplete) {
-			state.stops_shard_index = allShards.length;
-		}
-
-		if (state.stops.length === CROMA_SEARCH_TOTAL_CAP) {
-			const msg =
-				`Stop count is exactly ${CROMA_SEARCH_TOTAL_CAP} after sharding — still looks capped. ` +
-				`Croma stops-search totals are floored at 1000 (OpenAPI total_is_exact). Backfill + re-check required.`;
-			warnings.push(msg);
-			console.error(`WARNING: ${msg}`);
-			shardsComplete = false;
-		} else if (
-			state.stops.length > 0 &&
-			state.stops.length % CROMA_SEARCH_TOTAL_CAP === 0
-		) {
-			const msg = `Stop count ${state.stops.length} is a multiple of ${CROMA_SEARCH_TOTAL_CAP}; will verify via pattern-stop backfill.`;
-			warnings.push(msg);
-			console.error(`WARNING: ${msg}`);
-		}
-
-		// Tentative; finalized after backfill when dangling pattern stops are gone.
-		state.stops_pagination_verified = shardsComplete;
-		state.warnings = [...new Set([...state.warnings, ...warnings])];
-		state.phase = "routes_list";
-		state.routes_system_index = 0;
-		state.routes_page = 1;
+	const failBudget = (message: string): SyncResult => {
+		stoppedReason = "budget";
+		warnings.push(message);
 		persist();
-	}
-
-	// --- Phase: routes list by system ---
-	if (state.phase === "routes_list") {
-		progress("Fetching route ids by system");
-		const routeIdSet = new Set(state.route_ids);
-		for (let si = state.routes_system_index; si < ALL_SYSTEMS.length; si++) {
-			const system = ALL_SYSTEMS[si];
-			let page = si === state.routes_system_index ? state.routes_page : 1;
-			let totalPages = Number.POSITIVE_INFINITY;
-			while (page <= totalPages) {
-				if (maxPages != null && page > maxPages) break;
-				await throttle();
-				const result = await callApi(
-					`routes-search ${system} page ${page}`,
-					async () =>
-						options.client.searchRoutes({
-							system,
-							page,
-							per_page: 100,
-						}),
-				);
-				if (!result || result.kind === "error") {
-					errors.push(
-						`routes-search ${system} p${page}: ${result && result.kind === "error" ? result.message : "failed"}`,
-					);
-					if (result && result.kind === "error" && result.status === 429) {
-						await sleep(rateMs * 8);
-						continue;
-					}
-					break;
-				}
-				const data = result.data.data;
-				state.as_of = data.as_of ?? state.as_of;
-				totalPages = data.total_pages || 1;
-				if (data.total_is_exact === false) {
-					const msg = `routes-search ${system} hit 1000-match floor; results may be incomplete for this system`;
-					warnings.push(msg);
-					console.error(`WARNING: ${msg}`);
-				}
-				for (const route of data.routes) {
-					if (!routeIdSet.has(route.route_id)) {
-						routeIdSet.add(route.route_id);
-						state.route_ids.push(route.route_id);
-					}
-				}
-				page += 1;
-				state.routes_system_index = si;
-				state.routes_page = page;
-				persist();
-				progress(`Routes ${system} page ${page - 1}/${totalPages}`, {
-					routes: state.route_ids.length,
-				});
-				if (page > 1000) break;
-			}
-			state.routes_system_index = si + 1;
-			state.routes_page = 1;
-			persist();
-		}
-		state.phase = "routes_detail";
-		persist();
-	}
-
-	// --- Phase: route details (patterns) ---
-	if (state.phase === "routes_detail") {
-		progress("Fetching route patterns");
-		const done = new Set(state.route_ids_done);
-		const pending = state.route_ids.filter((id) => !done.has(id));
-		let fetched = 0;
-		for (const routeId of pending) {
-			if (maxRouteDetails != null && fetched >= maxRouteDetails) break;
-			await throttle();
-			const result = await callApi(`route ${routeId}`, async () =>
-				options.client.getRoute(routeId, false),
-			);
-			fetched += 1;
-			if (!result || result.kind === "error") {
-				errors.push(
-					`route ${routeId}: ${result && result.kind === "error" ? result.message : "failed"}`,
-				);
-				if (result && result.kind === "error" && result.status === 429) {
-					await sleep(rateMs * 8);
-				}
-				continue;
-			}
-			if (!result.data.data.route) {
-				errors.push(`route ${routeId}: found=false`);
-				done.add(routeId);
-				state.route_ids_done = [...done];
-				persist();
-				continue;
-			}
-			state.routes.push(compactRoute(result.data.data.route));
-			done.add(routeId);
-			state.route_ids_done = [...done];
-			persist();
-			if (fetched % 25 === 0) {
-				progress(`Route details ${done.size}/${state.route_ids.length}`, {
-					routeDetailsDone: done.size,
-					routeDetailsPending: state.route_ids.length - done.size,
-				});
-			}
-		}
-		state.phase = "stops_backfill";
-		persist();
-	}
-
-	// --- Phase: backfill pattern stop ids missing from snapshot ---
-	if (state.phase === "stops_backfill") {
-		progress("Backfilling pattern-referenced stops via stop/v1");
-		const known = stopIds();
-		const missing = new Set<string>();
-		const patternMeta = new Map<
-			string,
-			{ name: string | null; lat: number | null; lon: number | null }
-		>();
-		for (const route of state.routes) {
-			for (const pattern of route.patterns) {
-				for (const ps of pattern.stops) {
-					if (!known.has(ps.id)) {
-						missing.add(ps.id);
-						patternMeta.set(ps.id, {
-							name: ps.name,
-							lat: ps.lat,
-							lon: ps.lon,
-						});
-					}
-				}
-			}
-		}
-
-		if (state.backfill_ids.length === 0) {
-			state.backfill_ids = [...missing];
-			state.backfill_index = 0;
-			persist();
-		}
-
-		while (state.backfill_index < state.backfill_ids.length) {
-			const stopId = state.backfill_ids[state.backfill_index];
-			await throttle();
-			const result = await callApi(`stop ${stopId}`, async () =>
-				options.client.getStop(stopId),
-			);
-			if (result?.kind === "success" && result.data.data.stop) {
-				addStops([result.data.data.stop]);
-			} else {
-				const meta = patternMeta.get(stopId);
-				if (meta && (meta.lat != null || meta.name)) {
-					const ids = stopIds();
-					if (!ids.has(stopId)) {
-						state.stops.push(
-							compactStopFromPattern({
-								id: stopId,
-								name: meta.name,
-								lat: meta.lat,
-								lon: meta.lon,
-							}),
-						);
-						warnings.push(
-							`stop/v1 missing for ${stopId}; used pattern coordinates/name stub`,
-						);
-					}
-				} else {
-					errors.push(
-						`stop backfill ${stopId}: ${result && result.kind === "error" ? result.message : "not found"}`,
-					);
-				}
-			}
-			state.backfill_index += 1;
-			if (state.backfill_index % 50 === 0) {
-				persist();
-				progress(
-					`Backfill ${state.backfill_index}/${state.backfill_ids.length}`,
-					{
-						stops: state.stops.length,
-						backfillDone: state.backfill_index,
-						backfillPending:
-							state.backfill_ids.length - state.backfill_index,
-					},
-				);
-			}
-		}
-		persist();
-
-		// Re-check dangling after backfill
-		const knownAfter = stopIds();
-		let stillMissing = 0;
-		for (const route of state.routes) {
-			for (const pattern of route.patterns) {
-				for (const ps of pattern.stops) {
-					if (!knownAfter.has(ps.id)) stillMissing += 1;
-				}
-			}
-		}
-		if (stillMissing > 0) {
-			const msg = `${stillMissing} pattern stop ids still missing after backfill`;
-			warnings.push(msg);
-			console.error(`WARNING: ${msg}`);
-			state.stops_pagination_verified = false;
-		} else if (state.stops.length > CROMA_SEARCH_TOTAL_CAP) {
-			state.stops_pagination_verified = true;
-		}
-
-		state.warnings = [...new Set([...state.warnings, ...warnings])];
-		state.phase = "build";
-		persist();
-	}
-
-	// --- Phase: build snapshot + graph ---
-	if (state.phase === "build") {
-		progress("Building snapshot and graph");
-		const patterns = state.routes.reduce((n, r) => n + r.patterns.length, 0);
-		const snapshot: NetworkSnapshot = {
-			version: NETWORK_SNAPSHOT_VERSION,
-			fetched_at: new Date().toISOString(),
-			source: "croma",
-			as_of: state.as_of,
+		return {
+			success: false,
+			dry_run: dryRun,
+			errors: [...errors, ...state.errors],
+			warnings: [...new Set([...state.warnings, ...warnings])],
+			resumed,
+			api_calls: options.client.getNetworkCallCount(),
+			budget: budgetSnapshot(),
+			stopped_reason: "budget",
+			stops_from_patterns: true,
 			counts: {
 				stops: state.stops.length,
 				routes: state.routes.length,
-				patterns,
+				patterns: state.routes.reduce(
+					(n, r) => n + r.patterns.length,
+					0,
+				),
 			},
-			stops: state.stops,
-			routes: state.routes,
 		};
-		const graph = buildNetworkGraph(snapshot);
-		const allWarnings = [...new Set([...state.warnings, ...warnings])];
+	};
 
-		const cappedLooksBroken =
-			snapshot.counts.stops <= CROMA_SEARCH_TOTAL_CAP ||
-			(snapshot.counts.stops % CROMA_SEARCH_TOTAL_CAP === 0 &&
-				!state.stops_pagination_verified);
+	try {
+		// --- Phase: routes list by system ---
+		if (state.phase === "routes_list") {
+			progress("Listing route ids by system (route-first sync)");
+			const routeIdSet = new Set(state.route_ids);
 
-		if (cappedLooksBroken) {
-			const msg =
-				`Refusing success: stops=${snapshot.counts.stops}, ` +
-				`stops_pagination_verified=${state.stops_pagination_verified}. ` +
-				`Croma floors search totals at ${CROMA_SEARCH_TOTAL_CAP}; expected thousands of SITP/TM stops after geo shards + backfill.`;
-			errors.push(msg);
-			console.error(`ERROR: ${msg}`);
-			if (!dryRun) {
-				saveSnapshot(snapshot);
-				saveGraph(graph);
+			for (
+				let si = state.routes_system_index;
+				si < ALL_SYSTEMS.length;
+				si++
+			) {
+				const system = ALL_SYSTEMS[si] as TransitSystem;
+				let page =
+					si === state.routes_system_index ? state.routes_page : 1;
+				let totalPages = Number.POSITIVE_INFINITY;
+
+				while (page <= totalPages) {
+					if (maxPages != null && page > maxPages) break;
+					await throttle();
+
+					let result;
+					try {
+						result = await options.client.searchRoutes({
+							system,
+							page,
+							per_page: CROMA_LIST_PER_PAGE,
+						});
+					} catch (error) {
+						if (error instanceof BudgetExceededError) {
+							state.routes_system_index = si;
+							state.routes_page = page;
+							persist();
+							return failBudget(error.message);
+						}
+						if (error instanceof BillingError) {
+							return failBilling(error.message);
+						}
+						throw error;
+					}
+
+					if (result.kind === "error") {
+						if (result.status === 402) {
+							return failBilling(result.message);
+						}
+						errors.push(
+							`routes-search ${system} p${page}: ${result.message}`,
+						);
+						if (result.status === 429) {
+							await sleep(rateMs * 8);
+							continue;
+						}
+						break;
+					}
+
+					const data = result.data.data;
+					state.as_of = data.as_of ?? state.as_of;
+					totalPages = Math.max(data.total_pages || 1, 1);
+					if (data.total_is_exact === false) {
+						const msg = `routes-search ${system} hit 1000-match floor; results may be incomplete`;
+						warnings.push(msg);
+						console.error(`WARNING: ${msg}`);
+					}
+					for (const route of data.routes) {
+						if (!routeIdSet.has(route.route_id)) {
+							routeIdSet.add(route.route_id);
+							state.route_ids.push(route.route_id);
+						}
+					}
+					page += 1;
+					state.routes_system_index = si;
+					state.routes_page = page;
+					persist();
+					progress(
+						`Routes ${system} page ${page - 1}/${totalPages}`,
+						{ routes: state.route_ids.length },
+					);
+					if (page > 1000) break;
+				}
+				state.routes_system_index = si + 1;
+				state.routes_page = 1;
+				persist();
 			}
+			state.phase = "routes_detail";
+			persist();
+		}
+
+		// --- Phase: route details (patterns → stops) ---
+		if (state.phase === "routes_detail") {
+			progress("Fetching route patterns (stops embedded)");
+			const done = new Set(state.route_ids_done);
+			const pending = state.route_ids.filter((id) => !done.has(id));
+			let fetched = 0;
+
+			for (const routeId of pending) {
+				if (maxRouteDetails != null && fetched >= maxRouteDetails) {
+					stoppedReason = "dry_run_cap";
+					break;
+				}
+				await throttle();
+
+				let result;
+				try {
+					result = await options.client.getRoute(routeId, false);
+				} catch (error) {
+					if (error instanceof BudgetExceededError) {
+						persist();
+						return failBudget(error.message);
+					}
+					if (error instanceof BillingError) {
+						return failBilling(error.message);
+					}
+					throw error;
+				}
+
+				fetched += 1;
+
+				if (result.kind === "error") {
+					if (result.status === 402) {
+						return failBilling(result.message);
+					}
+					errors.push(`route ${routeId}: ${result.message}`);
+					if (result.status === 429) {
+						await sleep(rateMs * 8);
+					}
+					continue;
+				}
+
+				if (!result.data.data.route) {
+					errors.push(`route ${routeId}: found=false`);
+					done.add(routeId);
+					state.route_ids_done = [...done];
+					persist();
+					continue;
+				}
+
+				const compact = compactRoute(result.data.data.route);
+				const existingIdx = state.routes.findIndex(
+					(r) => r.id === compact.id,
+				);
+				if (existingIdx >= 0) state.routes[existingIdx] = compact;
+				else state.routes.push(compact);
+
+				done.add(routeId);
+				state.route_ids_done = [...done];
+				persist();
+
+				if (fetched % 25 === 0) {
+					progress(
+						`Route details ${done.size}/${state.route_ids.length}`,
+						{
+							routeDetailsDone: done.size,
+							routeDetailsPending:
+								state.route_ids.length - done.size,
+							routes: state.routes.length,
+						},
+					);
+				}
+			}
+
+			const stillPending = state.route_ids.filter(
+				(id) => !done.has(id),
+			).length;
+			if (stillPending === 0) {
+				state.phase = "build";
+				persist();
+			} else if (stoppedReason === "dry_run_cap") {
+				persist();
+				return {
+					success: false,
+					dry_run: dryRun,
+					errors: [...errors, ...state.errors],
+					warnings: [
+						...new Set([
+							...state.warnings,
+							...warnings,
+							`Stopped after --max-route-details; ${stillPending} routes remaining`,
+						]),
+					],
+					resumed,
+					api_calls: options.client.getNetworkCallCount(),
+					budget: budgetSnapshot(),
+					stopped_reason: "dry_run_cap",
+					stops_from_patterns: true,
+					counts: {
+						stops: 0,
+						routes: state.routes.length,
+						patterns: state.routes.reduce(
+							(n, r) => n + r.patterns.length,
+							0,
+						),
+					},
+				};
+			}
+		}
+
+		// --- Phase: build snapshot + graph ---
+		if (state.phase === "build") {
+			progress("Building snapshot from route pattern stops");
+			const stops = stopsFromRoutes(state.routes);
+			state.stops = stops;
+			state.stops_pagination_verified = true;
+			state.stops_from_patterns = true;
+
+			const patterns = state.routes.reduce(
+				(n, r) => n + r.patterns.length,
+				0,
+			);
+			const snapshot: NetworkSnapshot = {
+				version: NETWORK_SNAPSHOT_VERSION,
+				fetched_at: new Date().toISOString(),
+				source: "croma",
+				as_of: state.as_of,
+				counts: {
+					stops: stops.length,
+					routes: state.routes.length,
+					patterns,
+				},
+				stops,
+				routes: state.routes,
+			};
+			const graph = buildNetworkGraph(snapshot);
+			const allWarnings = [...new Set([...state.warnings, ...warnings])];
+
+			if (snapshot.counts.routes === 0) {
+				errors.push(
+					"Refusing success: routes=0 after sync. Check billing/budget and resume.",
+				);
+				persist();
+				return {
+					success: false,
+					dry_run: dryRun,
+					fetched_at: snapshot.fetched_at,
+					counts: snapshot.counts,
+					errors: [...errors, ...state.errors],
+					warnings: allWarnings,
+					resumed,
+					api_calls: options.client.getNetworkCallCount(),
+					budget: budgetSnapshot(),
+					stopped_reason: "error",
+					stops_from_patterns: true,
+				};
+			}
+
+			if (dryRun) {
+				state.phase = "done";
+				return {
+					success: errors.length === 0,
+					dry_run: true,
+					fetched_at: snapshot.fetched_at,
+					counts: snapshot.counts,
+					errors: [...errors, ...state.errors],
+					warnings: allWarnings,
+					resumed,
+					api_calls: options.client.getNetworkCallCount(),
+					budget: budgetSnapshot(),
+					stopped_reason: "complete",
+					stops_from_patterns: true,
+				};
+			}
+
+			saveSnapshot(snapshot);
+			saveGraph(graph);
 			state.phase = "done";
 			persist();
-			return {
-				success: false,
-				dry_run: dryRun,
-				fetched_at: snapshot.fetched_at,
-				counts: snapshot.counts,
-				paths: dryRun
-					? undefined
-					: {
-							snapshot: "data/network/snapshot.json",
-							graph: "data/network/graph.json",
-						},
-				errors: [...errors, ...state.errors],
-				warnings: allWarnings,
-				resumed,
-				api_calls: apiCalls,
-				stops_pagination_verified: false,
-			};
-		}
+			clearSyncState();
 
-		if (dryRun) {
-			state.phase = "done";
 			return {
 				success: errors.length === 0,
-				dry_run: true,
+				dry_run: false,
 				fetched_at: snapshot.fetched_at,
 				counts: snapshot.counts,
+				paths: {
+					snapshot: "data/network/snapshot.json",
+					graph: "data/network/graph.json",
+				},
 				errors: [...errors, ...state.errors],
 				warnings: allWarnings,
 				resumed,
-				api_calls: apiCalls,
-				stops_pagination_verified: state.stops_pagination_verified,
+				api_calls: options.client.getNetworkCallCount(),
+				budget: budgetSnapshot(),
+				stopped_reason: "complete",
+				stops_from_patterns: true,
 			};
 		}
-
-		saveSnapshot(snapshot);
-		saveGraph(graph);
-		state.phase = "done";
+	} catch (error) {
+		if (error instanceof BudgetExceededError) {
+			return failBudget(error.message);
+		}
+		if (error instanceof BillingError) {
+			return failBilling(error.message);
+		}
+		errors.push(error instanceof Error ? error.message : String(error));
 		persist();
-		clearSyncState();
-
 		return {
-			success: errors.length === 0,
-			dry_run: false,
-			fetched_at: snapshot.fetched_at,
-			counts: snapshot.counts,
-			paths: {
-				snapshot: "data/network/snapshot.json",
-				graph: "data/network/graph.json",
-			},
+			success: false,
+			dry_run: dryRun,
 			errors: [...errors, ...state.errors],
-			warnings: allWarnings,
+			warnings: [...new Set([...state.warnings, ...warnings])],
 			resumed,
-			api_calls: apiCalls,
-			stops_pagination_verified: state.stops_pagination_verified,
+			api_calls: options.client.getNetworkCallCount(),
+			budget: budgetSnapshot(),
+			stopped_reason: "error",
+			stops_from_patterns: true,
 		};
 	}
 
@@ -766,7 +634,9 @@ export async function syncNetwork(options: SyncOptions): Promise<SyncResult> {
 		errors: [...errors, ...state.errors],
 		warnings: [...new Set([...state.warnings, ...warnings])],
 		resumed,
-		api_calls: apiCalls,
-		stops_pagination_verified: state.stops_pagination_verified,
+		api_calls: options.client.getNetworkCallCount(),
+		budget: budgetSnapshot(),
+		stopped_reason: stoppedReason,
+		stops_from_patterns: true,
 	};
 }

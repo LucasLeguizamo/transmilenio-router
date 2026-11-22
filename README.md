@@ -43,7 +43,8 @@ export CROMA_API_KEY=your_key_here
 git clone https://github.com/LucasLeguizamo/transmilenio-router
 cd transmilenio-router
 pnpm install
-pnpm network:sync   # local stop/route graph (gitignored; needs CROMA_API_KEY)
+pnpm network:sync --estimate   # projected Croma credits (no key)
+pnpm network:sync              # local stop/route graph (gitignored; needs key)
 pnpm dev
 ```
 

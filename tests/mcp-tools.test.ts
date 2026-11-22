@@ -1,15 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MCPTools } from "../src/lib/mcp/tools";
 import { CromaClient } from "../src/lib/croma/client";
+import { CallLedger } from "../src/lib/croma/ledger";
+import { ResponseCache } from "../src/lib/croma/cache";
+import * as networkStore from "../src/lib/network/store";
 
 describe("MCPTools", () => {
 	let tools: MCPTools;
 	let mockClient: CromaClient;
 
 	beforeEach(() => {
+		vi.restoreAllMocks();
+		// Exercise Croma fallback path (no local snapshot).
+		vi.spyOn(networkStore, "loadNetworkBundle").mockReturnValue(null);
 		mockClient = new CromaClient({
 			apiKey: "test-key",
 			baseUrl: "https://api.croma.run",
+			disableCache: true,
+			cache: new ResponseCache({ enabled: false }),
+			ledger: new CallLedger({ persist: false }),
 		});
 		tools = new MCPTools(mockClient);
 	});

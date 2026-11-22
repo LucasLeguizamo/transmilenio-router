@@ -1,10 +1,32 @@
 import { z } from "zod";
 import { CromaClient, getCromaClient } from "../croma/client";
+import { findStopsLocal } from "../network/find-stops-local";
+import { loadNetworkBundle } from "../network/store";
+import type { NetworkStop } from "../network/types";
 import { createRoutePlanner, RoutePlanner } from "../routing/planner";
 import type { RoutePlan, RoutePlanResult } from "../routing/types";
 import type { Stop, Arrival, Alert } from "../croma/types";
 import { decodeHtmlEntities } from "../text/html-entities";
 import { systemLabel } from "../routing/systems";
+
+function networkStopToStop(stop: NetworkStop, distance_m?: number): Stop {
+	return {
+		stop_id: stop.id,
+		code: stop.code,
+		name: stop.name,
+		kind: (stop.kind as Stop["kind"]) || "stop",
+		parent_station: stop.parent,
+		latitude: stop.lat,
+		longitude: stop.lon,
+		wheelchair_boarding: null,
+		zone_id: null,
+		route_ids: stop.route_ids,
+		route_codes: stop.route_codes,
+		systems: stop.systems,
+		platforms: stop.platforms,
+		distance_m: distance_m ?? null,
+	};
+}
 
 const DEFAULT_ALERT_LIMIT = 20;
 
@@ -232,6 +254,46 @@ export class MCPTools {
 	}
 
 	async findStops(input: z.infer<typeof FindStopsInput>): Promise<ToolResult> {
+		// Prefer local snapshot (0 credits). Fall back to Croma only if missing.
+		const bundle = loadNetworkBundle();
+		if (bundle) {
+			const local = findStopsLocal(bundle, {
+				query: input.query,
+				latitude: input.latitude,
+				longitude: input.longitude,
+				radiusMeters: input.radiusMeters,
+				route: input.route,
+				limit: input.limit ?? 10,
+			});
+			if (local.length === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "No stops found matching your criteria (local network).",
+						},
+					],
+				};
+			}
+			const stops = local.map((s) =>
+				networkStopToStop(
+					s,
+					input.latitude != null && input.longitude != null
+						? undefined
+						: undefined,
+				),
+			);
+			const summary = `${this.formatStopsSummary(stops)}\n\n(Source: local network snapshot)`;
+			const center =
+				input.latitude && input.longitude
+					? { lat: input.latitude, lon: input.longitude }
+					: undefined;
+			return {
+				content: [{ type: "text", text: summary }],
+				_meta: { ui: generateStopsMapUI(stops, center) },
+			};
+		}
+
 		const result = await this.client.searchStops({
 			query: input.query,
 			latitude: input.latitude,

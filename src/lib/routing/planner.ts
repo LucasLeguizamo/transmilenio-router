@@ -202,34 +202,40 @@ export class RoutePlanner {
 			return { ...result, debug };
 		};
 
+		// Credit policy: plan_route uses the local graph only (0 Croma calls).
+		// forceApi remains for explicit diagnostics and burns credits heavily.
 		if (!forceApi) {
 			const bundle = loadNetworkBundle();
-			if (bundle?.fresh) {
-				const local = await planRouteLocal(bundle, request);
-				if (local.kind === "success") {
-					const alerts = await this.getRelevantAlerts(local.plan.segments);
-					return withDebug({
-						kind: "success",
-						plan: {
-							...local.plan,
-							alerts,
-							limitations: [
-								...local.plan.limitations,
-								...(wantDebug
-									? ["planner=local_network"]
-									: []),
-							],
-						},
-					});
-				}
-				// Same-place rejection is definitive; other local misses fall through to live Croma.
-				if (
-					local.kind === "no_route" &&
-					/same place/i.test(local.reason)
-				) {
-					return withDebug(local);
-				}
+			if (!bundle) {
+				return withDebug({
+					kind: "no_route",
+					reason:
+						"No local network snapshot. Run `pnpm network:sync` (credits) once, then plan_route is offline.",
+				});
 			}
+			if (!bundle.fresh) {
+				return withDebug({
+					kind: "no_route",
+					reason:
+						"Local network snapshot is stale. Run `pnpm network:sync` to refresh (uses cached route/v1 when warm).",
+				});
+			}
+			const local = await planRouteLocal(bundle, request);
+			if (local.kind === "success") {
+				return withDebug({
+					kind: "success",
+					plan: {
+						...local.plan,
+						alerts: [],
+						limitations: [
+							...local.plan.limitations,
+							"Alerts omitted on local plans to avoid Croma credit use; call service_alerts separately.",
+							...(wantDebug ? ["planner=local_network"] : []),
+						],
+					},
+				});
+			}
+			return withDebug(local);
 		}
 
 		const origin = await this.resolveEndpoint(request.origin, maxWalk);

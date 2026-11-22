@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 /**
- * Sync the local TransMilenio network snapshot from Croma.
+ * Sync the local TransMilenio network snapshot from Croma (route-first, credit-aware).
  *
  * Usage:
- *   pnpm network:sync
+ *   pnpm network:sync --estimate
+ *   pnpm network:sync --max-calls 1200
  *   pnpm network:sync --json
  *   pnpm network:sync --dry-run --max-pages 1 --max-route-details 5
  *   pnpm network:sync --no-resume
@@ -13,9 +14,13 @@
  *   data/network/snapshot.json
  *   data/network/graph.json
  *   data/network/sync-state.json (while in progress)
+ *   data/croma-cache/ (HTTP response cache + ledger)
  */
 
-import { getCromaClient } from "../src/lib/croma/client";
+import { getCromaClient, resetDefaultCromaClient } from "../src/lib/croma/client";
+import { resetSharedLedger } from "../src/lib/croma/ledger";
+import { DEFAULT_SYNC_MAX_CALLS } from "../src/lib/croma/paths";
+import { estimateSyncCalls } from "../src/lib/network/estimate";
 import { syncNetwork } from "../src/lib/network/sync";
 
 function parseArgs(args: string[]): Record<string, string | boolean> {
@@ -37,28 +42,36 @@ function parseArgs(args: string[]): Record<string, string | boolean> {
 
 function printHelp(): void {
 	console.log(`
-TransMilenio local network sync
+TransMilenio local network sync (route-first, credit-aware)
 
 USAGE:
   pnpm network:sync [options]
 
 OPTIONS:
+  --estimate             Print projected call counts (no API key required)
   --json                 Machine-readable JSON result
   --dry-run              Fetch pages but do not write snapshot/graph
   --no-resume            Ignore sync-state.json and start fresh
-  --rate-ms <n>          Delay between API calls (default 200)
-  --max-pages <n>        Cap list pagination (useful for smoke/dry-run)
-  --max-route-details <n> Cap route/v1 detail fetches
-  --max-shards <n>       Cap geo/kind stop shards (smoke only)
+  --rate-ms <n>          Delay between API calls (default 50)
+  --max-calls <n>        Hard network-call budget (default ${DEFAULT_SYNC_MAX_CALLS})
+  --max-pages <n>        Cap list pagination (smoke)
+  --max-route-details <n> Cap route/v1 detail fetches (smoke)
   --help                 Show this help
 
+STRATEGY:
+  1. routes-search per system (page size ${100})
+  2. route/v1 per id — patterns embed stop id/name/lat/lon
+  3. Build stops from embeds (no geo stop shards / stop/v1 spam)
+  Responses are cached under data/croma-cache/; resume skips cached calls.
+
 ENV:
-  CROMA_API_KEY          Required for live sync
+  CROMA_API_KEY          Required for live sync (not for --estimate)
+  CROMA_MAX_CALLS        Default budget override
   NETWORK_MAX_AGE_HOURS  Freshness window for plan_route (default 168)
 
 EXIT CODES:
-  0  Sync completed (or dry-run completed)
-  1  Sync failed
+  0  Sync completed (or estimate printed)
+  1  Sync failed / budget / billing stop
   2  Invalid args / missing key
 `);
 }
@@ -70,18 +83,62 @@ async function main(): Promise<void> {
 		process.exit(0);
 	}
 
+	if (flags.estimate === true) {
+		const estimate = estimateSyncCalls();
+		if (flags.json) {
+			console.log(JSON.stringify(estimate, null, 2));
+		} else {
+			console.log("\nCroma sync estimate (route-first)\n");
+			console.log(`  Cold full sync:     ~${estimate.total_cold} network calls`);
+			console.log(
+				`    routes-search:    ~${estimate.routes_list_pages_projected} pages`,
+			);
+			console.log(
+				`    route/v1:         ~${estimate.route_details_projected_cold}`,
+			);
+			console.log(
+				`  This run projected: ~${estimate.total_projected} (cache hits free)`,
+			);
+			console.log(
+				`  Fresh cached routes:${estimate.route_details_cached_fresh}`,
+			);
+			console.log(
+				`  Refresh if warm:    ~${estimate.total_refresh_if_fresh} (re-list only)`,
+			);
+			for (const note of estimate.notes) {
+				console.log(`  • ${note}`);
+			}
+		}
+		process.exit(0);
+	}
+
 	if (!process.env.CROMA_API_KEY) {
 		const payload = {
 			success: false,
 			error:
-				"CROMA_API_KEY required. Get a key at https://usecroma.com — snapshot is not committed (Croma ToS).",
+				"CROMA_API_KEY required. Get a key at https://usecroma.com — snapshot is not committed (Croma ToS). Use --estimate without a key.",
 		};
 		if (flags.json) console.log(JSON.stringify(payload, null, 2));
 		else console.error(payload.error);
 		process.exit(2);
 	}
 
-	const client = getCromaClient();
+	const maxCalls =
+		typeof flags["max-calls"] === "string"
+			? parseInt(flags["max-calls"], 10)
+			: DEFAULT_SYNC_MAX_CALLS;
+
+	resetSharedLedger();
+	resetDefaultCromaClient();
+	const client = getCromaClient({ maxCalls });
+
+	const estimate = estimateSyncCalls();
+	if (!flags.json) {
+		console.error(
+			`Estimate: ~${estimate.total_projected} network calls this run (cold ~${estimate.total_cold}); budget ${maxCalls}`,
+		);
+	}
+
 	const result = await syncNetwork({
 		client,
 		dryRun: flags["dry-run"] === true,
@@ -89,7 +146,8 @@ async function main(): Promise<void> {
 		rateMs:
 			typeof flags["rate-ms"] === "string"
 				? parseInt(flags["rate-ms"], 10)
-				: 200,
+				: 50,
+		maxCalls,
 		maxPages:
 			typeof flags["max-pages"] === "string"
 				? parseInt(flags["max-pages"], 10)
@@ -98,10 +156,6 @@ async function main(): Promise<void> {
 			typeof flags["max-route-details"] === "string"
 				? parseInt(flags["max-route-details"], 10)
 				: undefined,
-		maxShards:
-			typeof flags["max-shards"] === "string"
-				? parseInt(flags["max-shards"], 10)
-				: undefined,
 		onProgress: (event) => {
 			if (!flags.json) {
 				console.error(`[${event.phase}] ${event.message}`);
@@ -109,26 +163,33 @@ async function main(): Promise<void> {
 		},
 	});
 
+	const ledgerSummary = client.getLedger().summary();
+
 	if (flags.json) {
-		console.log(JSON.stringify(result, null, 2));
+		console.log(
+			JSON.stringify({ ...result, ledger: ledgerSummary, estimate }, null, 2),
+		);
 	} else {
 		if (result.success) {
 			console.log(
 				result.dry_run
-					? `Dry-run ok — would write ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes (${result.api_calls} API calls)`
-					: `Synced ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes → ${result.paths?.snapshot}`,
+					? `Dry-run ok — would write ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes (${result.api_calls} network calls)`
+					: `Synced ${result.counts?.stops ?? 0} stops / ${result.counts?.routes ?? 0} routes → ${result.paths?.snapshot} (${result.api_calls} network calls)`,
 			);
-			if (result.stops_pagination_verified === false) {
-				console.error(
-					"WARNING: stops pagination was not fully verified (check warnings).",
-				);
-			}
 		} else {
-			console.error("Sync failed:");
+			console.error(`Sync stopped (${result.stopped_reason ?? "error"}):`);
 			for (const err of result.errors) console.error(`  - ${err}`);
 		}
 		for (const warn of result.warnings) {
 			console.error(`WARNING: ${warn}`);
+		}
+		console.error(
+			`Ledger: ${ledgerSummary.network} network / ${ledgerSummary.hits} cache hits`,
+		);
+		if (result.budget) {
+			console.error(
+				`Budget: ${result.budget.used}/${result.budget.maxCalls ?? "∞"} used`,
+			);
 		}
 	}
 

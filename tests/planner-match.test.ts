@@ -141,6 +141,7 @@ describe("RoutePlanner direct match across station vs platform ids", () => {
 			destination: { text: "Calle 100" },
 			maxTransfers: 1,
 			debug: true,
+			forceApi: true,
 		});
 
 		expect(result.kind).toBe("success");
@@ -248,6 +249,7 @@ describe("RoutePlanner direct match across station vs platform ids", () => {
 			origin: { text: "Portal Norte" },
 			destination: { text: "Calle 100" },
 			maxTransfers: 1,
+			forceApi: true,
 		});
 
 		expect(result.kind).toBe("success");

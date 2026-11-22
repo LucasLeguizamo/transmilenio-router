@@ -220,6 +220,7 @@ describe("RoutePlanner name resolution", () => {
 		const result = await planner.planRoute({
 			origin: { text: "Portal Norte" },
 			destination: { text: "Calle 100" },
+			forceApi: true,
 		});
 
 		expect(result.kind).toBe("success");

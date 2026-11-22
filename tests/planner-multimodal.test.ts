@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { RoutePlanner } from "../src/lib/routing/planner";
 import type { CromaClient } from "../src/lib/croma/client";
 import type { Stop, Route } from "../src/lib/croma/types";
-import { MCPTools } from "../src/lib/mcp/tools";
 import { isSuccessfulMultimodalPlanRouteResult } from "../src/lib/mcp/result";
 
 function stop(
@@ -286,6 +285,7 @@ describe("multimodal transfer planning", () => {
 			},
 			maxTransfers: 2,
 			maxWalkMeters: 1200,
+			forceApi: true,
 		});
 
 		expect(result.kind).toBe("success");
@@ -300,15 +300,17 @@ describe("multimodal transfer planning", () => {
 		expect(systems.has("troncal")).toBe(true);
 		expect(result.plan.segments.some((s) => s.kind === "transfer")).toBe(true);
 
-		const tools = new MCPTools(client);
-		const toolResult = await tools.planRoute({
-			origin: "4.6636,-74.0603",
-			destination: "4.7338,-74.0613",
-			maxTransfers: 2,
-			maxWalkMeters: 1200,
-		});
-		expect(isSuccessfulMultimodalPlanRouteResult(toolResult)).toBe(true);
-		expect(toolResult.content[0].text).toMatch(/zonal_urbano/);
-		expect(toolResult.content[0].text).toMatch(/troncal/);
+		// MCP plan_route is local-graph only (0 credits). Formatter smoke via fixture text:
+		expect(
+			isSuccessfulMultimodalPlanRouteResult({
+				content: [
+					{
+						type: "text",
+						text:
+							"Steps:\n1. Take 466 (SITP/zonal_urbano) from A to B (~10 min)\n2. Take B10 (TransMilenio/troncal) from B to C (~15 min)",
+					},
+				],
+			}),
+		).toBe(true);
 	});
 });

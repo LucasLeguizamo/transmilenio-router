@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CromaClient } from "../src/lib/croma/client";
+import { CallLedger } from "../src/lib/croma/ledger";
+import { ResponseCache } from "../src/lib/croma/cache";
 
 describe("CromaClient", () => {
 	let client: CromaClient;
 
 	beforeEach(() => {
+		vi.restoreAllMocks();
 		client = new CromaClient({
 			apiKey: "test-key",
 			baseUrl: "https://api.croma.run",
+			disableCache: true,
+			cache: new ResponseCache({ enabled: false }),
+			ledger: new CallLedger({ persist: false }),
 		});
 	});
 

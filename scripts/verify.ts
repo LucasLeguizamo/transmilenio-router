@@ -338,6 +338,17 @@ async function runMCPTests(
 			};
 		}
 
+		const { resetSharedLedger } = await import(
+			"../src/lib/croma/ledger.js"
+		);
+		const { resetDefaultCromaClient, getCromaClient } = await import(
+			"../src/lib/croma/client.js"
+		);
+		const ledger = resetSharedLedger({ persist: false });
+		resetDefaultCromaClient();
+		// Live verify budget: arrivals + alerts only (plan/find are local).
+		getCromaClient({ maxCalls: 4 });
+
 		const { createMCPTools } = await import("../src/lib/mcp/tools.js");
 		const tools = createMCPTools();
 
@@ -364,37 +375,7 @@ async function runMCPTests(
 			}
 		}
 
-		const findStopsResult = await runTool("find_stops", () =>
-			tools.findStops({
-				query: "Portal Norte",
-				limit: 5,
-			}),
-		);
-
-		const stopIdMatch = findStopsResult?.content
-			?.map((item) => item.text ?? "")
-			.join("\n")
-			.match(/ID:\s*([A-Za-z0-9_-]+)/);
-		const stopId = stopIdMatch?.[1];
-
-		await runTool("stop_arrivals", async () => {
-			if (!stopId) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Error: No stop id from find_stops to query arrivals",
-						},
-					],
-				};
-			}
-			return tools.getStopArrivals({ stopId, limit: 5 });
-		});
-
-		await runTool("service_alerts", () =>
-			tools.getServiceAlerts({ limit: 10 }),
-		);
-
+		// plan_route / find_stops use local snapshot (0 credits) when present.
 		await runTool(
 			"plan_route",
 			() =>
@@ -407,7 +388,6 @@ async function runMCPTests(
 			{ portalCalle100: true },
 		);
 
-		// Named multimodal smoke: address → neighborhood across systems.
 		try {
 			const multimodal = await tools.planRoute({
 				origin: "Calle 76 con Carrera 20, Bogotá",
@@ -428,6 +408,51 @@ async function runMCPTests(
 				output: { error: String(error) },
 			});
 		}
+
+		const findStopsResult = await runTool("find_stops", () =>
+			tools.findStops({
+				query: "Portal Norte",
+				limit: 5,
+			}),
+		);
+
+		const stopIdMatch = findStopsResult?.content
+			?.map((item) => item.text ?? "")
+			.join("\n")
+			.match(/ID:\s*([A-Za-z0-9_-]+)/);
+		const stopId = stopIdMatch?.[1];
+
+		await runTool("stop_arrivals", async () => {
+			if (!stopId) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: No stop id from find_stops to query arrivals (need local snapshot or live search)",
+						},
+					],
+				};
+			}
+			return tools.getStopArrivals({ stopId, limit: 5 });
+		});
+
+		await runTool("service_alerts", () =>
+			tools.getServiceAlerts({ limit: 10 }),
+		);
+
+		const ledgerSummary = ledger.summary();
+		results.push({
+			tool: "croma_call_ledger",
+			success: ledgerSummary.network <= 2,
+			output: {
+				content: [
+					{
+						type: "text",
+						text: `Live verify network calls: ${ledgerSummary.network} (hits ${ledgerSummary.hits}) by_endpoint=${JSON.stringify(ledgerSummary.by_endpoint)}`,
+					},
+				],
+			},
+		});
 	}
 
 	const success = results.every((r) => r.success);
@@ -599,7 +624,6 @@ async function runNetworkTests(
 	const { NetworkSnapshotSchema } = await import(
 		"../src/lib/network/types.js"
 	);
-	const { RoutePlanner } = await import("../src/lib/routing/planner.js");
 
 	const fixturePath = join(FIXTURES_DIR, "network", "mini-snapshot.json");
 	const fixtureSnapshot = NetworkSnapshotSchema.parse(
@@ -639,20 +663,19 @@ async function runNetworkTests(
 	);
 	const localMs = Date.now() - t0;
 
-	let apiMs: number | null = null;
-	let apiKind: string | null = null;
-	if (flags.live === true && process.env.CROMA_API_KEY) {
-		const planner = new RoutePlanner();
+	// plan_route is local-only (0 Croma calls). --live only re-times disk snapshot.
+	let diskPlanMs: number | null = null;
+	let diskPlanKind: string | null = null;
+	if (flags.live === true && liveBundle) {
 		const t1 = Date.now();
-		const apiResult = await planner.planRoute({
+		const diskResult = await planRouteLocal(liveBundle, {
 			origin: localOrigin,
 			destination: localDest,
 			maxTransfers: 2,
 			maxWalkMeters: 1200,
-			forceApi: true,
 		});
-		apiMs = Date.now() - t1;
-		apiKind = apiResult.kind;
+		diskPlanMs = Date.now() - t1;
+		diskPlanKind = diskResult.kind;
 	}
 
 	const success =
@@ -666,12 +689,11 @@ async function runNetworkTests(
 		bundle_fresh: liveBundle?.fresh ?? false,
 		perf: {
 			local_plan_ms: localMs,
-			api_plan_ms: apiMs,
-			api_kind: apiKind,
+			disk_plan_ms: diskPlanMs,
+			disk_plan_kind: diskPlanKind,
+			croma_calls: 0,
 			note:
-				apiMs == null
-					? "Pass --live with CROMA_API_KEY to compare API latency"
-					: "Lower local_plan_ms vs api_plan_ms is expected after sync",
+				"plan_route is local-only (0 Croma credits). Use pnpm network:sync for snapshot refresh.",
 		},
 	};
 
@@ -694,8 +716,10 @@ async function runNetworkTests(
 		console.log(
 			`${localResult.kind === "success" ? "✅" : "❌"} local plan_route (fixture multimodal) in ${localMs}ms`,
 		);
-		if (apiMs != null) {
-			console.log(`⏱️  API plan_route (forceApi) in ${apiMs}ms (${apiKind})`);
+		if (diskPlanMs != null) {
+			console.log(
+				`⏱️  disk plan_route in ${diskPlanMs}ms (${diskPlanKind}) — 0 Croma calls`,
+			);
 		}
 		for (const issue of fixtureReport.issues) {
 			console.log(`   fixture issue: ${issue.code} — ${issue.message}`);

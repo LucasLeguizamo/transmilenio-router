@@ -42,6 +42,9 @@ artifacts/*
 data/network/*.json
 !data/network/README.md
 
+# Croma HTTP response cache + call ledger (credit-saving; do not commit)
+data/croma-cache/
+
 # Vercel
 .vercel/
 tsconfig.tsbuildinfo

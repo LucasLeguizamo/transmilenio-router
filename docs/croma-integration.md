@@ -230,12 +230,17 @@ The client does not currently implement automatic rate limit handling. For high-
 
 ## Credits
 
-Croma charges credits per API call. Check [Croma pricing](https://usecroma.com/pricing) for current rates. The client does not track credit usage.
+Croma charges credits per API call. See **[croma-credits.md](./croma-credits.md)** for the credit model, expected call counts, budgets, ledger, and cache.
+
+Summary: cold sync ≈ **1,060** calls (route-first); `plan_route` / local `find_stops` = **0**; live arrivals/alerts use short TTL caches. HTTP 402 is terminal (no retries).
 
 ## Code Location
 
-- `src/lib/croma/client.ts` - API client
+- `src/lib/croma/client.ts` - API client (ledger, cache, budget, 402/429)
+- `src/lib/croma/cache.ts` / `ledger.ts` - response cache + call ledger
 - `src/lib/croma/types.ts` - Zod schemas
+- `src/lib/network/sync.ts` - route-first syncer
+- `docs/croma-credits.md` - credit guide
 
 ## Testing
 
