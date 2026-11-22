@@ -1,0 +1,47 @@
+{
+	"data": {
+		"as_of": "2024-01-15T10:00:00-05:00",
+		"query": "Portal Norte",
+		"route": null,
+		"kind": null,
+		"latitude": null,
+		"longitude": null,
+		"radius_m": null,
+		"total": 1,
+		"total_is_exact": true,
+		"page": 1,
+		"per_page": 20,
+		"total_pages": 1,
+		"count": 1,
+		"stops": [
+			{
+				"stop_id": "10001",
+				"code": "B096",
+				"name": "Portal Norte",
+				"kind": "station",
+				"parent_station": null,
+				"latitude": 4.7616,
+				"longitude": -74.0463,
+				"wheelchair_boarding": "accessible",
+				"zone_id": null,
+				"route_ids": ["10075", "10076"],
+				"route_codes": ["B10", "B12"],
+				"routes": [
+					{
+						"route_id": "10075",
+						"short_name": "B10",
+						"long_name": "Portal Sur"
+					}
+				],
+				"systems": ["troncal"],
+				"platforms": [],
+				"address": null,
+				"street": null,
+				"locality": null,
+				"wagons": null,
+				"entrances": null,
+				"distance_m": null
+			}
+		]
+	}
+}

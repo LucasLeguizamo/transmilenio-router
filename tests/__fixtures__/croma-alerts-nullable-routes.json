@@ -1,0 +1,32 @@
+{
+	"data": {
+		"as_of": "2024-01-15T10:00:00-05:00",
+		"route": null,
+		"stop_id": null,
+		"count": 1,
+		"alerts": [
+			{
+				"alert_id": "alert-html-entities",
+				"cause": "construction",
+				"effect": "detour",
+				"header": "Cierre temporal en CICLOV&Iacute;A",
+				"description": "Desv&iacute;o por obras",
+				"url": null,
+				"active_periods": [{ "start": "2024-01-15", "end": null }],
+				"routes": [
+					{
+						"route_id": "10075",
+						"route_code": null,
+						"route_name": null
+					}
+				],
+				"stops": [
+					{
+						"stop_id": "10001",
+						"name": null
+					}
+				]
+			}
+		]
+	}
+}

@@ -30,271 +30,325 @@ export type TransitMode = z.infer<typeof TransitMode>;
 export const ArrivalBasis = z.enum(["predicted", "estimated", "scheduled"]);
 export type ArrivalBasis = z.infer<typeof ArrivalBasis>;
 
-const RouteRef = z.object({
-	route_id: z.string(),
-	short_name: z.string().nullable(),
-	long_name: z.string().nullable(),
-});
+/** OpenAPI marks many string fields as `string | null` and required. */
+const NullableString = z.string().nullable();
+const NullableNumber = z.number().nullable();
 
-export const Stop = z.object({
-	stop_id: z.string(),
-	code: z.string().nullable(),
-	name: z.string(),
-	kind: StopKind,
-	parent_station: z.string().nullable(),
-	latitude: z.number(),
-	longitude: z.number(),
-	wheelchair_boarding: WheelchairBoarding.nullable(),
-	zone_id: z.string().nullable(),
-	route_ids: z.array(z.string()),
-	route_codes: z.array(z.string()),
-	routes: z.array(RouteRef).optional(),
-	distance_m: z.number().optional(),
-});
+const RouteRef = z
+	.object({
+		route_id: z.string(),
+		short_name: NullableString,
+		long_name: NullableString,
+	})
+	.passthrough();
+
+export const Stop = z
+	.object({
+		stop_id: z.string(),
+		code: NullableString,
+		name: z.string(),
+		kind: StopKind,
+		parent_station: NullableString,
+		latitude: z.number(),
+		longitude: z.number(),
+		wheelchair_boarding: WheelchairBoarding.nullable(),
+		zone_id: NullableString,
+		route_ids: z.array(z.string()),
+		route_codes: z.array(z.string()),
+		routes: z.array(RouteRef).optional(),
+		systems: z.array(z.string()).optional(),
+		platforms: z.array(z.unknown()).optional(),
+		address: NullableString.optional(),
+		street: NullableString.optional(),
+		locality: NullableString.optional(),
+		wagons: z.unknown().nullable().optional(),
+		entrances: z.unknown().nullable().optional(),
+		// OpenAPI: integer | null; null when search has no reference point
+		distance_m: NullableNumber.optional(),
+	})
+	.passthrough();
 export type Stop = z.infer<typeof Stop>;
 
 export const StopsSearchResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		query: z.string().optional(),
-		route: z.string().nullable().optional(),
-		kind: z.string().nullable().optional(),
-		latitude: z.number().nullable().optional(),
-		longitude: z.number().nullable().optional(),
-		radius_m: z.number().nullable().optional(),
-		total: z.number(),
-		total_is_exact: z.boolean(),
-		page: z.number(),
-		per_page: z.number(),
-		total_pages: z.number(),
-		count: z.number(),
-		stops: z.array(Stop),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			query: z.string().optional(),
+			route: NullableString.optional(),
+			kind: NullableString.optional(),
+			latitude: NullableNumber.optional(),
+			longitude: NullableNumber.optional(),
+			radius_m: NullableNumber.optional(),
+			total: z.number(),
+			total_is_exact: z.boolean(),
+			page: z.number(),
+			per_page: z.number(),
+			total_pages: z.number(),
+			count: z.number(),
+			stops: z.array(Stop),
+		})
+		.passthrough(),
 });
 export type StopsSearchResponse = z.infer<typeof StopsSearchResponse>;
 
 export const StopResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		found: z.boolean(),
-		stop_id: z.string(),
-		stop: Stop.nullable(),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			found: z.boolean(),
+			stop_id: z.string(),
+			stop: Stop.nullable(),
+		})
+		.passthrough(),
 });
 export type StopResponse = z.infer<typeof StopResponse>;
 
-const RouteStop = z.object({
-	stop_id: z.string(),
-	code: z.string().nullable(),
-	name: z.string(),
-	latitude: z.number(),
-	longitude: z.number(),
-	minutes: z.number().nullable(),
-});
+const RouteStop = z
+	.object({
+		stop_id: z.string(),
+		code: NullableString,
+		name: z.string(),
+		latitude: z.number(),
+		longitude: z.number(),
+		minutes: NullableNumber,
+	})
+	.passthrough();
 
-const RoutePattern = z.object({
-	pattern_id: z.string(),
-	headsign: z.string().nullable(),
-	direction: z.number().nullable(),
-	stops: z.array(RouteStop),
-	geometry: z
-		.object({
-			type: z.literal("LineString"),
-			coordinates: z.array(z.tuple([z.number(), z.number()])),
-		})
-		.nullable()
-		.optional(),
-});
+const RoutePattern = z
+	.object({
+		pattern_id: z.string(),
+		headsign: NullableString,
+		direction: NullableNumber,
+		stops: z.array(RouteStop),
+		geometry: z
+			.object({
+				type: z.literal("LineString"),
+				coordinates: z.array(z.tuple([z.number(), z.number()])),
+			})
+			.nullable()
+			.optional(),
+	})
+	.passthrough();
 
-const RouteService = z.object({
-	service_id: z.string(),
-	monday: z.boolean(),
-	tuesday: z.boolean(),
-	wednesday: z.boolean(),
-	thursday: z.boolean(),
-	friday: z.boolean(),
-	saturday: z.boolean(),
-	sunday: z.boolean(),
-});
+const RouteService = z
+	.object({
+		service_id: z.string(),
+		monday: z.boolean(),
+		tuesday: z.boolean(),
+		wednesday: z.boolean(),
+		thursday: z.boolean(),
+		friday: z.boolean(),
+		saturday: z.boolean(),
+		sunday: z.boolean(),
+	})
+	.passthrough();
 
-export const Route = z.object({
-	route_id: z.string(),
-	short_name: z.string().nullable(),
-	long_name: z.string().nullable(),
-	system: TransitSystem,
-	system_name: z.string().nullable(),
-	mode: TransitMode,
-	color: z.string().nullable(),
-	text_color: z.string().nullable(),
-	stops_count: z.number(),
-	trips_per_week: z.number(),
-	first_departure: z.string().nullable(),
-	last_departure: z.string().nullable(),
-	services: z.array(RouteService).optional(),
-	patterns: z.array(RoutePattern).optional(),
-});
+export const Route = z
+	.object({
+		route_id: z.string(),
+		short_name: NullableString,
+		long_name: NullableString,
+		system: TransitSystem,
+		system_name: NullableString,
+		mode: TransitMode,
+		color: NullableString,
+		text_color: NullableString,
+		stops_count: z.number(),
+		trips_per_week: z.number(),
+		first_departure: NullableString,
+		last_departure: NullableString,
+		services: z.array(RouteService).optional(),
+		patterns: z.array(RoutePattern).optional(),
+	})
+	.passthrough();
 export type Route = z.infer<typeof Route>;
 
 export const RoutesSearchResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		query: z.string().optional(),
-		system: z.string().nullable().optional(),
-		stop_id: z.string().nullable().optional(),
-		total: z.number(),
-		total_is_exact: z.boolean(),
-		page: z.number(),
-		per_page: z.number(),
-		total_pages: z.number(),
-		count: z.number(),
-		routes: z.array(Route),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			query: z.string().optional(),
+			system: NullableString.optional(),
+			stop_id: NullableString.optional(),
+			total: z.number(),
+			total_is_exact: z.boolean(),
+			page: z.number(),
+			per_page: z.number(),
+			total_pages: z.number(),
+			count: z.number(),
+			routes: z.array(Route),
+		})
+		.passthrough(),
 });
 export type RoutesSearchResponse = z.infer<typeof RoutesSearchResponse>;
 
 export const RouteResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		found: z.boolean(),
-		route_id: z.string(),
-		route: Route.nullable(),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			found: z.boolean(),
+			route_id: z.string(),
+			route: Route.nullable(),
+		})
+		.passthrough(),
 });
 export type RouteResponse = z.infer<typeof RouteResponse>;
 
-export const Arrival = z.object({
-	predicted_at: z.string().nullable(),
-	minutes_away: z.number().nullable(),
-	basis: ArrivalBasis,
-	delay_seconds: z.number().nullable(),
-	stop_id: z.string(),
-	route_id: z.string().nullable(),
-	route_code: z.string().nullable(),
-	route_name: z.string().nullable(),
-	system: TransitSystem.nullable(),
-	trip_id: z.string().nullable(),
-	vehicle_id: z.string().nullable(),
-	vehicle_label: z.string().nullable(),
-});
+export const Arrival = z
+	.object({
+		predicted_at: NullableString,
+		minutes_away: NullableNumber,
+		basis: ArrivalBasis,
+		delay_seconds: NullableNumber,
+		stop_id: z.string(),
+		route_id: NullableString,
+		route_code: NullableString,
+		route_name: NullableString,
+		system: TransitSystem.nullable(),
+		trip_id: NullableString,
+		vehicle_id: NullableString,
+		vehicle_label: NullableString,
+	})
+	.passthrough();
 export type Arrival = z.infer<typeof Arrival>;
 
 export const StopArrivalsResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		live: z.boolean(),
-		notice: z.string().nullable(),
-		found: z.boolean(),
-		stop_id: z.string(),
-		stop_name: z.string().nullable(),
-		route: z.string().nullable(),
-		count: z.number(),
-		arrivals: z.array(Arrival),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			live: z.boolean(),
+			notice: NullableString,
+			found: z.boolean(),
+			stop_id: z.string(),
+			stop_name: NullableString,
+			route: NullableString,
+			count: z.number(),
+			arrivals: z.array(Arrival),
+		})
+		.passthrough(),
 });
 export type StopArrivalsResponse = z.infer<typeof StopArrivalsResponse>;
 
-export const Departure = z.object({
-	time: z.string(),
-	at: z.string(),
-	minutes_from_now: z.number().nullable(),
-	route_id: z.string(),
-	route_code: z.string().nullable(),
-	route_name: z.string().nullable(),
-	system: TransitSystem,
-	stop_id: z.string(),
-});
+export const Departure = z
+	.object({
+		time: z.string(),
+		at: z.string(),
+		minutes_from_now: NullableNumber,
+		route_id: z.string(),
+		route_code: NullableString,
+		route_name: NullableString,
+		system: TransitSystem,
+		stop_id: z.string(),
+	})
+	.passthrough();
 export type Departure = z.infer<typeof Departure>;
 
 export const StopDeparturesResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		found: z.boolean(),
-		stop_id: z.string(),
-		stop_name: z.string().nullable(),
-		date: z.string(),
-		from_time: z.string(),
-		route: z.string().nullable(),
-		services: z.array(z.string()),
-		count: z.number(),
-		departures: z.array(Departure),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			found: z.boolean(),
+			stop_id: z.string(),
+			stop_name: NullableString,
+			date: z.string(),
+			from_time: z.string(),
+			route: NullableString,
+			services: z.array(z.string()),
+			count: z.number(),
+			departures: z.array(Departure),
+		})
+		.passthrough(),
 });
 export type StopDeparturesResponse = z.infer<typeof StopDeparturesResponse>;
 
-export const Vehicle = z.object({
-	vehicle_id: z.string().nullable(),
-	label: z.string().nullable(),
-	license_plate: z.string().nullable(),
-	latitude: z.number(),
-	longitude: z.number(),
-	bearing: z.number().nullable(),
-	speed_kmh: z.number().nullable(),
-	route_id: z.string().nullable(),
-	route_code: z.string().nullable(),
-	route_name: z.string().nullable(),
-	system: TransitSystem.nullable(),
-	trip_id: z.string().nullable(),
-	current_stop_id: z.string().nullable(),
-	next_stop_id: z.string().nullable(),
-});
+export const Vehicle = z
+	.object({
+		vehicle_id: NullableString,
+		label: NullableString,
+		license_plate: NullableString,
+		latitude: z.number(),
+		longitude: z.number(),
+		bearing: NullableNumber,
+		speed_kmh: NullableNumber,
+		route_id: NullableString,
+		route_code: NullableString,
+		route_name: NullableString,
+		system: TransitSystem.nullable(),
+		trip_id: NullableString,
+		current_stop_id: NullableString,
+		next_stop_id: NullableString,
+	})
+	.passthrough();
 export type Vehicle = z.infer<typeof Vehicle>;
 
 export const VehiclesResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		live: z.boolean(),
-		notice: z.string().nullable(),
-		route: z.string().nullable(),
-		latitude: z.number().nullable(),
-		longitude: z.number().nullable(),
-		radius_m: z.number().nullable(),
-		total: z.number(),
-		page: z.number(),
-		per_page: z.number(),
-		total_pages: z.number(),
-		count: z.number(),
-		vehicles: z.array(Vehicle),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			live: z.boolean(),
+			notice: NullableString,
+			route: NullableString,
+			latitude: NullableNumber,
+			longitude: NullableNumber,
+			radius_m: NullableNumber,
+			total: z.number(),
+			page: z.number(),
+			per_page: z.number(),
+			total_pages: z.number(),
+			count: z.number(),
+			vehicles: z.array(Vehicle),
+		})
+		.passthrough(),
 });
 export type VehiclesResponse = z.infer<typeof VehiclesResponse>;
 
-const AlertRoute = z.object({
-	route_id: z.string(),
-	route_code: z.string().nullable(),
-	route_name: z.string().nullable(),
-});
+const AlertRoute = z
+	.object({
+		route_id: z.string(),
+		route_code: NullableString,
+		route_name: NullableString,
+	})
+	.passthrough();
 
-const AlertStop = z.object({
-	stop_id: z.string(),
-	name: z.string().nullable(),
-});
+const AlertStop = z
+	.object({
+		stop_id: z.string(),
+		name: NullableString,
+	})
+	.passthrough();
 
-const AlertPeriod = z.object({
-	start: z.string().nullable(),
-	end: z.string().nullable(),
-});
+const AlertPeriod = z
+	.object({
+		start: NullableString,
+		end: NullableString,
+	})
+	.passthrough();
 
-export const Alert = z.object({
-	alert_id: z.string(),
-	cause: z.string().nullable(),
-	effect: z.string().nullable(),
-	header: z.string().nullable(),
-	description: z.string().nullable(),
-	url: z.string().nullable(),
-	active_periods: z.array(AlertPeriod),
-	routes: z.array(AlertRoute),
-	stops: z.array(AlertStop),
-});
+export const Alert = z
+	.object({
+		alert_id: z.string(),
+		cause: NullableString,
+		effect: NullableString,
+		header: NullableString,
+		description: NullableString,
+		url: NullableString,
+		active_periods: z.array(AlertPeriod),
+		routes: z.array(AlertRoute),
+		stops: z.array(AlertStop),
+	})
+	.passthrough();
 export type Alert = z.infer<typeof Alert>;
 
 export const AlertsResponse = z.object({
-	data: z.object({
-		as_of: z.string().nullable(),
-		route: z.string().nullable(),
-		stop_id: z.string().nullable(),
-		count: z.number(),
-		alerts: z.array(Alert),
-	}),
+	data: z
+		.object({
+			as_of: NullableString,
+			route: NullableString,
+			stop_id: NullableString,
+			count: z.number(),
+			alerts: z.array(Alert),
+		})
+		.passthrough(),
 });
 export type AlertsResponse = z.infer<typeof AlertsResponse>;
 

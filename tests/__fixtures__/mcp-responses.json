@@ -1,46 +1,46 @@
 {
-  "find_stops": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Found 3 stop(s):\n\n• Portal Norte\n  ID: 10001 | Routes: B10, B12, K86\n• Calle 127\n  ID: 10002 | Routes: B10, B73\n• Calle 100\n  ID: 10003 | Routes: B10, K86, J24"
-      }
-    ],
-    "_meta": {
-      "ui": "ui://transmilenio-mcp/stops-map?data=%7B%22type%22%3A%22stops-map%22%7D"
-    }
-  },
-  "stop_arrivals": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Arrivals at Portal Norte\n(Live data)\n\n• B10: 3 min\n• K86: 7 min\n• B12: 12 min"
-      }
-    ],
-    "_meta": {
-      "ui": "ui://transmilenio-mcp/arrivals?data=%7B%22type%22%3A%22arrivals%22%7D"
-    }
-  },
-  "service_alerts": {
-    "content": [
-      {
-        "type": "text",
-        "text": "1 Service Alert(s):\n\n⚠️ REDUCED_SERVICE\n   Maintenance on B10 corridor\n   Affects: B10, B12\n"
-      }
-    ],
-    "_meta": {
-      "ui": "ui://transmilenio-mcp/alerts?data=%7B%22type%22%3A%22alerts%22%7D"
-    }
-  },
-  "plan_route": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Route from Portal Norte to Museo Nacional\nTotal time: ~25 minutes\nWalking: 5 minutes\nTransfers: 0\n\nSteps:\n1. Walk 200m to Portal Norte (~3 min)\n2. Take B10 from Portal Norte to Calle 26 (~20 min)\n3. Walk 150m to Museo Nacional (~2 min)"
-      }
-    ],
-    "_meta": {
-      "ui": "ui://transmilenio-mcp/route-map?data=%7B%22type%22%3A%22route-map%22%7D"
-    }
-  }
+	"find_stops": {
+		"content": [
+			{
+				"type": "text",
+				"text": "Found 3 stop(s):\n\n• Portal Norte\n  ID: 10001 | Routes: B10, B12, K86\n• Calle 127\n  ID: 10002 | Routes: B10, B73\n• Calle 100\n  ID: 10003 | Routes: B10, K86, J24"
+			}
+		],
+		"_meta": {
+			"ui": "ui://transmilenio-mcp/stops-map?data=%7B%22type%22%3A%22stops-map%22%7D"
+		}
+	},
+	"stop_arrivals": {
+		"content": [
+			{
+				"type": "text",
+				"text": "Arrivals at Portal Norte\n(Live data)\n\n• B10: 3 min\n• K86: 7 min\n• B12: 12 min"
+			}
+		],
+		"_meta": {
+			"ui": "ui://transmilenio-mcp/arrivals?data=%7B%22type%22%3A%22arrivals%22%7D"
+		}
+	},
+	"service_alerts": {
+		"content": [
+			{
+				"type": "text",
+				"text": "Showing 1 of 1 service alert(s):\n\n⚠️ REDUCED_SERVICE\n   Maintenance on B10 corridor\n   Affects: B10, B12\n"
+			}
+		],
+		"_meta": {
+			"ui": "ui://transmilenio-mcp/alerts?data=%7B%22type%22%3A%22alerts%22%7D"
+		}
+	},
+	"plan_route": {
+		"content": [
+			{
+				"type": "text",
+				"text": "Route from Portal Norte to Museo Nacional\nTotal time: ~25 minutes\nWalking: 5 minutes\nTransfers: 0\n\nSteps:\n1. Walk 200m to Portal Norte (~3 min)\n2. Take B10 from Portal Norte to Calle 26 (~20 min)\n3. Walk 150m to Museo Nacional (~2 min)"
+			}
+		],
+		"_meta": {
+			"ui": "ui://transmilenio-mcp/route-map?data=%7B%22type%22%3A%22route-map%22%7D"
+		}
+	}
 }

@@ -51,12 +51,12 @@ export class CromaClient {
 
 		if (!response.ok) {
 			const errorBody = await response.text();
-		let parsed: { code?: string; message?: string };
-		try {
-			parsed = JSON.parse(errorBody);
-		} catch {
-			parsed = { message: errorBody };
-		}
+			let parsed: { code?: string; message?: string };
+			try {
+				parsed = JSON.parse(errorBody);
+			} catch {
+				parsed = { message: errorBody };
+			}
 			return {
 				kind: "error",
 				status: response.status,

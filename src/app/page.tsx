@@ -27,7 +27,7 @@ export default function Home() {
 			<h2>Setup</h2>
 			<p>
 				See the{" "}
-				<a href="https://github.com/lucasleguizamon/transmilenio-mcp">
+				<a href="https://github.com/LucasLeguizamo/transmilenio-router">
 					README
 				</a>{" "}
 				for setup instructions.

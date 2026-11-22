@@ -17,6 +17,10 @@ import { spawn, ChildProcess } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { chromium, Browser } from "playwright";
+import {
+	isSuccessfulToolResult,
+	type ToolResultLike,
+} from "../src/lib/mcp/result";
 
 const ARTIFACTS_DIR = join(process.cwd(), "artifacts");
 const FIXTURES_DIR = join(process.cwd(), "tests", "__fixtures__");
@@ -310,10 +314,11 @@ async function runMCPTests(
 		const fixtures = JSON.parse(readFileSync(fixtureFile, "utf-8"));
 
 		for (const tool of Object.keys(fixtures)) {
+			const output = fixtures[tool] as ToolResultLike;
 			results.push({
 				tool,
-				success: true,
-				output: fixtures[tool],
+				success: isSuccessfulToolResult(output),
+				output,
 			});
 		}
 	} else {
@@ -329,38 +334,66 @@ async function runMCPTests(
 		const { createMCPTools } = await import("../src/lib/mcp/tools.js");
 		const tools = createMCPTools();
 
-		try {
-			const findStopsResult = await tools.findStops({
-				query: "Portal Norte",
-				limit: 5,
-			});
-			results.push({
-				tool: "find_stops",
-				success: findStopsResult.content.length > 0,
-				output: findStopsResult,
-			});
-		} catch (error) {
-			results.push({
-				tool: "find_stops",
-				success: false,
-				output: { error: String(error) },
-			});
+		async function runTool(
+			tool: string,
+			fn: () => Promise<ToolResultLike>,
+		): Promise<ToolResultLike | null> {
+			try {
+				const output = await fn();
+				results.push({
+					tool,
+					success: isSuccessfulToolResult(output),
+					output,
+				});
+				return output;
+			} catch (error) {
+				results.push({
+					tool,
+					success: false,
+					output: { error: String(error) },
+				});
+				return null;
+			}
 		}
 
-		try {
-			const alertsResult = await tools.getServiceAlerts({});
-			results.push({
-				tool: "service_alerts",
-				success: true,
-				output: alertsResult,
-			});
-		} catch (error) {
-			results.push({
-				tool: "service_alerts",
-				success: false,
-				output: { error: String(error) },
-			});
-		}
+		const findStopsResult = await runTool("find_stops", () =>
+			tools.findStops({
+				query: "Portal Norte",
+				limit: 5,
+			}),
+		);
+
+		const stopIdMatch = findStopsResult?.content
+			?.map((item) => item.text ?? "")
+			.join("\n")
+			.match(/ID:\s*([A-Za-z0-9_-]+)/);
+		const stopId = stopIdMatch?.[1];
+
+		await runTool("stop_arrivals", async () => {
+			if (!stopId) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: No stop id from find_stops to query arrivals",
+						},
+					],
+				};
+			}
+			return tools.getStopArrivals({ stopId, limit: 5 });
+		});
+
+		await runTool("service_alerts", () =>
+			tools.getServiceAlerts({ limit: 10 }),
+		);
+
+		await runTool("plan_route", () =>
+			tools.planRoute({
+				origin: "Portal Norte",
+				destination: "Calle 100",
+				maxTransfers: 1,
+			}),
+		);
 	}
 
 	const success = results.every((r) => r.success);

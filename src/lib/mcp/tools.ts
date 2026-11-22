@@ -3,6 +3,9 @@ import { CromaClient, getCromaClient } from "../croma/client";
 import { createRoutePlanner, RoutePlanner } from "../routing/planner";
 import type { RoutePlan, RoutePlanResult } from "../routing/types";
 import type { Stop, Arrival, Alert } from "../croma/types";
+import { decodeHtmlEntities } from "../text/html-entities";
+
+const DEFAULT_ALERT_LIMIT = 20;
 
 export const PlanRouteInput = z.object({
 	origin: z
@@ -73,6 +76,10 @@ export const ServiceAlertsInput = z.object({
 		.string()
 		.optional()
 		.describe("Filter alerts by stop ID"),
+	limit: z
+		.number()
+		.optional()
+		.describe(`Maximum alerts to return in the summary (default ${DEFAULT_ALERT_LIMIT})`),
 });
 
 function parseLocation(input: string): {
@@ -121,9 +128,31 @@ function generateArrivalsUI(
 	return `ui://transmilenio-mcp/arrivals?data=${encodeURIComponent(JSON.stringify(uiData))}`;
 }
 
-function generateAlertsUI(alerts: Alert[]): string {
+function sanitizeAlert(alert: Alert): Alert {
+	return {
+		...alert,
+		header: alert.header ? decodeHtmlEntities(alert.header) : alert.header,
+		description: alert.description
+			? decodeHtmlEntities(alert.description)
+			: alert.description,
+		routes: alert.routes.map((route) => ({
+			...route,
+			route_name: route.route_name
+				? decodeHtmlEntities(route.route_name)
+				: route.route_name,
+		})),
+		stops: alert.stops.map((stop) => ({
+			...stop,
+			name: stop.name ? decodeHtmlEntities(stop.name) : stop.name,
+		})),
+	};
+}
+
+function generateAlertsUI(alerts: Alert[], totalCount: number): string {
 	const uiData = {
 		type: "alerts",
+		totalCount,
+		shown: alerts.length,
 		alerts,
 	};
 	return `ui://transmilenio-mcp/alerts?data=${encodeURIComponent(JSON.stringify(uiData))}`;
@@ -258,19 +287,21 @@ export class MCPTools {
 			};
 		}
 
-		const alerts = result.data.data.alerts;
+		const alerts = result.data.data.alerts.map(sanitizeAlert);
 		if (alerts.length === 0) {
 			return {
 				content: [{ type: "text", text: "No active service alerts." }],
 			};
 		}
 
-		const summary = this.formatAlertsSummary(alerts);
+		const limit = input.limit ?? DEFAULT_ALERT_LIMIT;
+		const shown = alerts.slice(0, limit);
+		const summary = this.formatAlertsSummary(shown, alerts.length);
 
 		return {
 			content: [{ type: "text", text: summary }],
 			_meta: {
-				ui: generateAlertsUI(alerts),
+				ui: generateAlertsUI(shown, alerts.length),
 			},
 		};
 	}
@@ -326,7 +357,10 @@ export class MCPTools {
 		for (const stop of stops) {
 			const routes = stop.route_codes.slice(0, 5).join(", ");
 			const moreRoutes = stop.route_codes.length > 5 ? ` +${stop.route_codes.length - 5} more` : "";
-			const distance = stop.distance_m ? ` (${Math.round(stop.distance_m)}m away)` : "";
+			const distance =
+				stop.distance_m != null
+					? ` (${Math.round(stop.distance_m)}m away)`
+					: "";
 			lines.push(`• ${stop.name}${distance}`);
 			lines.push(`  ID: ${stop.stop_id} | Routes: ${routes}${moreRoutes}`);
 		}
@@ -365,9 +399,15 @@ export class MCPTools {
 		return lines.join("\n");
 	}
 
-	private formatAlertsSummary(alerts: Alert[]): string {
+	private formatAlertsSummary(alerts: Alert[], totalCount: number): string {
 		const lines: string[] = [];
-		lines.push(`${alerts.length} Service Alert(s):`);
+		if (alerts.length < totalCount) {
+			lines.push(
+				`Showing ${alerts.length} of ${totalCount} service alert(s):`,
+			);
+		} else {
+			lines.push(`${totalCount} Service Alert(s):`);
+		}
 		lines.push("");
 
 		for (const alert of alerts) {
@@ -376,10 +416,18 @@ export class MCPTools {
 			lines.push(`⚠️ ${effect.toUpperCase()}`);
 			lines.push(`   ${header}`);
 			if (alert.routes.length > 0) {
-				const routes = alert.routes.map((r) => r.route_code ?? r.route_id).join(", ");
+				const routes = alert.routes
+					.map((r) => r.route_code ?? r.route_id)
+					.join(", ");
 				lines.push(`   Affects: ${routes}`);
 			}
 			lines.push("");
+		}
+
+		if (alerts.length < totalCount) {
+			lines.push(
+				`…and ${totalCount - alerts.length} more. Pass limit or filter by route/stopId.`,
+			);
 		}
 
 		return lines.join("\n");

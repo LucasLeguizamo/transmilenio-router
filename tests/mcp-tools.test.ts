@@ -123,6 +123,39 @@ describe("MCPTools", () => {
 			expect(result._meta?.ui).toContain("ui://transmilenio-mcp/alerts");
 		});
 
+		it("decodes HTML entities and caps alert output", async () => {
+			const many = Array.from({ length: 25 }, (_, i) => ({
+				alert_id: `alert-${i}`,
+				cause: "construction",
+				effect: "detour",
+				header: `CICLOV&Iacute;A ${i}`,
+				description: null,
+				url: null,
+				active_periods: [],
+				routes: [{ route_id: "10075", route_code: null, route_name: null }],
+				stops: [],
+			}));
+
+			vi.spyOn(mockClient, "getAlerts").mockResolvedValueOnce({
+				kind: "success",
+				data: {
+					data: {
+						as_of: "2024-01-15T10:00:00-05:00",
+						route: null,
+						stop_id: null,
+						count: many.length,
+						alerts: many,
+					},
+				},
+			});
+
+			const result = await tools.getServiceAlerts({ limit: 5 });
+
+			expect(result.content[0].text).toContain("Showing 5 of 25");
+			expect(result.content[0].text).toContain("CICLOVÍA");
+			expect(result.content[0].text).not.toContain("&Iacute;");
+		});
+
 		it("should handle no active alerts", async () => {
 			vi.spyOn(mockClient, "getAlerts").mockResolvedValueOnce({
 				kind: "success",
