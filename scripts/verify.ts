@@ -83,11 +83,13 @@ OPTIONS:
   --json       Output results as JSON
   --dry-run    Show what would be done without executing
   --live       Use live Croma API instead of fixtures (requires CROMA_API_KEY)
+  --verbose    For mcp/plan_route: dump candidate stops, shared codes, and match outcomes
   --port NUM   Port for dev server (default: 3457)
 
 EXAMPLES:
   pnpm verify doctor --json
   pnpm verify mcp --live
+  pnpm verify mcp --live --verbose
   pnpm verify ui
   pnpm verify all --dry-run
 
@@ -235,6 +237,7 @@ async function runMCPTests(
 ): Promise<VerifyResult> {
 	const start = Date.now();
 	const useLive = flags.live === true;
+	const verbose = flags.verbose === true;
 	const results: Array<{ tool: string; success: boolean; output: unknown }> = [];
 
 	if (flags["dry-run"]) {
@@ -392,6 +395,7 @@ async function runMCPTests(
 				origin: "Portal Norte",
 				destination: "Calle 100",
 				maxTransfers: 1,
+				debug: verbose,
 			}),
 		);
 	}
@@ -407,6 +411,16 @@ async function runMCPTests(
 			console.log(`${icon} ${result.tool}`);
 			if (!result.success && result.output) {
 				console.log(`   Error: ${JSON.stringify(result.output)}`);
+			}
+			if (verbose && result.tool === "plan_route" && result.output) {
+				const text = (result.output as ToolResultLike).content
+					?.map((item) => item.text ?? "")
+					.join("\n");
+				if (text?.includes("--- plan_route debug ---")) {
+					console.log(text.slice(text.indexOf("--- plan_route debug ---")));
+				} else if (text) {
+					console.log(text);
+				}
 			}
 		}
 		console.log(`\n${success ? "✅ All MCP tests passed" : "❌ Some tests failed"}`);

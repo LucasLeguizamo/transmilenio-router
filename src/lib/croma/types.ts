@@ -39,6 +39,7 @@ const RouteRef = z
 		route_id: z.string(),
 		short_name: NullableString,
 		long_name: NullableString,
+		system: TransitSystem.optional(),
 	})
 	.passthrough();
 
@@ -57,12 +58,13 @@ export const Stop = z
 		route_codes: z.array(z.string()),
 		routes: z.array(RouteRef).optional(),
 		systems: z.array(z.string()).optional(),
-		platforms: z.array(z.unknown()).optional(),
+		/** Station → platform stop_ids (OpenAPI: string[]). */
+		platforms: z.array(z.string()).optional(),
 		address: NullableString.optional(),
 		street: NullableString.optional(),
 		locality: NullableString.optional(),
-		wagons: z.unknown().nullable().optional(),
-		entrances: z.unknown().nullable().optional(),
+		wagons: NullableNumber.optional(),
+		entrances: NullableNumber.optional(),
 		// OpenAPI: integer | null; null when search has no reference point
 		distance_m: NullableNumber.optional(),
 	})
@@ -103,43 +105,50 @@ export const StopResponse = z.object({
 });
 export type StopResponse = z.infer<typeof StopResponse>;
 
+/** Pattern stop as returned by Croma route/v1 (not our old minutes-based guess). */
 const RouteStop = z
 	.object({
+		sequence: z.number().optional(),
 		stop_id: z.string(),
 		code: NullableString,
-		name: z.string(),
-		latitude: z.number(),
-		longitude: z.number(),
-		minutes: NullableNumber,
+		name: NullableString,
+		latitude: NullableNumber,
+		longitude: NullableNumber,
+		offset_seconds: NullableNumber.optional(),
+		// Tolerate older/fixture shapes
+		minutes: NullableNumber.optional(),
 	})
 	.passthrough();
+export type RouteStop = z.infer<typeof RouteStop>;
 
 const RoutePattern = z
 	.object({
-		pattern_id: z.string(),
-		headsign: NullableString,
-		direction: NullableNumber,
+		shape_id: NullableString.optional(),
+		// Tolerate older/fixture field names
+		pattern_id: z.string().optional(),
+		headsign: NullableString.optional(),
+		direction: NullableNumber.optional(),
+		trips_per_week: z.number().optional(),
+		length_m: NullableNumber.optional(),
 		stops: z.array(RouteStop),
 		geometry: z
 			.object({
 				type: z.literal("LineString"),
-				coordinates: z.array(z.tuple([z.number(), z.number()])),
+				coordinates: z.array(z.array(z.number())),
 			})
 			.nullable()
 			.optional(),
 	})
 	.passthrough();
+export type RoutePattern = z.infer<typeof RoutePattern>;
 
 const RouteService = z
 	.object({
 		service_id: z.string(),
-		monday: z.boolean(),
-		tuesday: z.boolean(),
-		wednesday: z.boolean(),
-		thursday: z.boolean(),
-		friday: z.boolean(),
-		saturday: z.boolean(),
-		sunday: z.boolean(),
+		days: z.array(z.string()).optional(),
+		trips: z.number().optional(),
+		first_departure: NullableString.optional(),
+		last_departure: NullableString.optional(),
 	})
 	.passthrough();
 
@@ -159,6 +168,10 @@ export const Route = z
 		last_departure: NullableString,
 		services: z.array(RouteService).optional(),
 		patterns: z.array(RoutePattern).optional(),
+		origin: NullableString.optional(),
+		destination: NullableString.optional(),
+		headways: z.array(z.unknown()).optional(),
+		hours: z.unknown().optional(),
 	})
 	.passthrough();
 export type Route = z.infer<typeof Route>;

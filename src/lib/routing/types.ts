@@ -100,12 +100,37 @@ export type RoutePlanRequest = {
 	};
 	maxWalkMeters?: number;
 	maxTransfers?: number;
+	debug?: boolean;
+};
+
+export type RoutePlanDebugStop = {
+	stop_id: string;
+	name: string;
+	kind: string;
+	route_ids: string[];
+	route_codes: string[];
+	platforms: string[];
+	parent_station: string | null;
+};
+
+export type RoutePlanDebugCandidate = {
+	route_id: string;
+	route_code: string | null;
+	outcome: string;
+};
+
+export type RoutePlanDebug = {
+	originStops: RoutePlanDebugStop[];
+	destStops: RoutePlanDebugStop[];
+	sharedRouteIds: string[];
+	sharedRouteCodes: string[];
+	candidatesTried: RoutePlanDebugCandidate[];
 };
 
 export type RoutePlanResult =
-	| { kind: "success"; plan: RoutePlan }
-	| { kind: "no_route"; reason: string }
-	| { kind: "error"; message: string };
+	| { kind: "success"; plan: RoutePlan; debug?: RoutePlanDebug }
+	| { kind: "no_route"; reason: string; debug?: RoutePlanDebug }
+	| { kind: "error"; message: string; debug?: RoutePlanDebug };
 
 export type StopWithArrivals = Stop & {
 	arrivals: Arrival[];

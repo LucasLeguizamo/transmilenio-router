@@ -197,10 +197,23 @@ describe("RoutePlanner name resolution", () => {
 			},
 		}));
 
+		const getStop = vi.fn(async (stopId: string) => ({
+			kind: "success" as const,
+			data: {
+				data: {
+					as_of: null,
+					found: true,
+					stop_id: stopId,
+					stop: stopId === portal.stop_id ? portal : calle100,
+				},
+			},
+		}));
+
 		const client = {
 			searchStops,
 			getRoute,
 			getAlerts,
+			getStop,
 		} as unknown as CromaClient;
 
 		const planner = new RoutePlanner(client);

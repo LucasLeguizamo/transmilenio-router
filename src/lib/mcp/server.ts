@@ -40,6 +40,11 @@ const TOOLS = [
 					type: "number",
 					description: "Maximum number of transfers (default 2)",
 				},
+				debug: {
+					type: "boolean",
+					description:
+						"Include candidate stops, shared route codes, and match outcomes in the text response",
+				},
 			},
 			required: ["origin", "destination"],
 		},

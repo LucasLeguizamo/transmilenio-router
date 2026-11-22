@@ -26,6 +26,12 @@ export const PlanRouteInput = z.object({
 		.number()
 		.optional()
 		.describe("Maximum number of transfers (default 2)"),
+	debug: z
+		.boolean()
+		.optional()
+		.describe(
+			"When true, include route-search debug (candidate stops, shared codes, outcomes) in the tool result text",
+		),
 });
 
 export const FindStopsInput = z.object({
@@ -183,17 +189,33 @@ export class MCPTools {
 			destination,
 			maxWalkMeters: input.maxWalkMeters,
 			maxTransfers: input.maxTransfers,
+			debug: input.debug === true,
 		});
+
+		const debugSuffix =
+			input.debug && result.debug
+				? `\n\n--- plan_route debug ---\n${JSON.stringify(result.debug, null, 2)}`
+				: "";
 
 		if (result.kind === "error") {
 			return {
-				content: [{ type: "text", text: `Error: ${result.message}` }],
+				content: [
+					{
+						type: "text",
+						text: `Error: ${result.message}${debugSuffix}`,
+					},
+				],
 			};
 		}
 
 		if (result.kind === "no_route") {
 			return {
-				content: [{ type: "text", text: `No route found: ${result.reason}` }],
+				content: [
+					{
+						type: "text",
+						text: `No route found: ${result.reason}${debugSuffix}`,
+					},
+				],
 			};
 		}
 
@@ -201,7 +223,7 @@ export class MCPTools {
 		const summary = this.formatRouteSummary(plan);
 
 		return {
-			content: [{ type: "text", text: summary }],
+			content: [{ type: "text", text: `${summary}${debugSuffix}` }],
 			_meta: {
 				ui: generateRouteMapUI(plan),
 			},

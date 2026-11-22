@@ -17,6 +17,11 @@ const TOOL_LIST = [
 				destination: { type: "string", description: "Destination location" },
 				maxWalkMeters: { type: "number", description: "Maximum walking distance" },
 				maxTransfers: { type: "number", description: "Maximum transfers" },
+				debug: {
+					type: "boolean",
+					description:
+						"Dump candidate stops and route-match outcomes into the text response",
+				},
 			},
 			required: ["origin", "destination"],
 		},

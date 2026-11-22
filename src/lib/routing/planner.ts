@@ -1,8 +1,11 @@
 import { CromaClient, getCromaClient } from "../croma/client";
 import type { Stop, Alert } from "../croma/types";
+import type { Route, RouteStop as PatternStop } from "../croma/types";
 import type {
 	RoutePlanRequest,
 	RoutePlanResult,
+	RoutePlanDebug,
+	RoutePlanDebugStop,
 	RouteSegment,
 	WalkSegment,
 	TransferSegment,
@@ -67,6 +70,150 @@ function rankStopsByQuery(stops: Stop[], query: string): Stop[] {
 	);
 }
 
+function normalizeStopName(name: string): string {
+	return name
+		.normalize("NFD")
+		.replace(/\p{M}/gu, "")
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** Strip articles / wagon suffixes so "Portal del Norte" ≈ "Portal Norte T1". */
+function coreStopName(name: string): string {
+	return normalizeStopName(name)
+		.replace(/\b(del|de|la|el|los|las)\b/g, " ")
+		.replace(/\b[a-z]?\d+\b/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function namesLooselyMatch(a: string, b: string): boolean {
+	const na = normalizeStopName(a);
+	const nb = normalizeStopName(b);
+	if (!na || !nb) return false;
+	if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+	const ca = coreStopName(a);
+	const cb = coreStopName(b);
+	if (!ca || !cb) return false;
+	return ca === cb || ca.includes(cb) || cb.includes(ca);
+}
+
+function debugStop(stop: Stop): RoutePlanDebugStop {
+	return {
+		stop_id: stop.stop_id,
+		name: stop.name,
+		kind: stop.kind,
+		route_ids: stop.route_ids,
+		route_codes: stop.route_codes,
+		platforms: stop.platforms ?? [],
+		parent_station: stop.parent_station,
+	};
+}
+
+/** Collect station + platform + parent ids usable against pattern stop_ids. */
+function collectMatchIds(candidates: Stop[]): Set<string> {
+	const ids = new Set<string>();
+	for (const stop of candidates) {
+		ids.add(stop.stop_id);
+		if (stop.parent_station) ids.add(stop.parent_station);
+		for (const platformId of stop.platforms ?? []) {
+			ids.add(platformId);
+		}
+	}
+	return ids;
+}
+
+function collectCodeToIds(stops: Stop[]): Map<string, Set<string>> {
+	const map = new Map<string, Set<string>>();
+	for (const stop of stops) {
+		if (stop.routes && stop.routes.length > 0) {
+			for (const route of stop.routes) {
+				const code = route.short_name?.toUpperCase();
+				if (!code) continue;
+				const set = map.get(code) ?? new Set<string>();
+				set.add(route.route_id);
+				map.set(code, set);
+			}
+			continue;
+		}
+		const n = Math.min(stop.route_ids.length, stop.route_codes.length);
+		for (let i = 0; i < n; i++) {
+			const code = stop.route_codes[i]?.toUpperCase();
+			if (!code) continue;
+			const set = map.get(code) ?? new Set<string>();
+			set.add(stop.route_ids[i]);
+			map.set(code, set);
+		}
+		for (let i = n; i < stop.route_ids.length; i++) {
+			// ids without paired codes still participate via id intersection
+		}
+	}
+	return map;
+}
+
+/** route_ids shared by id, plus both sides' ids for shared public codes. */
+function candidateRouteIds(originStops: Stop[], destStops: Stop[]): {
+	routeIds: string[];
+	sharedIds: string[];
+	sharedCodes: string[];
+} {
+	const originIds = new Set(originStops.flatMap((s) => s.route_ids));
+	const destIds = new Set(destStops.flatMap((s) => s.route_ids));
+	const sharedIds = [...originIds].filter((id) => destIds.has(id));
+
+	const originCodes = collectCodeToIds(originStops);
+	const destCodes = collectCodeToIds(destStops);
+	const sharedCodes = [...originCodes.keys()].filter((code) =>
+		destCodes.has(code),
+	);
+
+	const candidates = new Set<string>(sharedIds);
+	for (const code of sharedCodes) {
+		for (const id of originCodes.get(code) ?? []) candidates.add(id);
+		for (const id of destCodes.get(code) ?? []) candidates.add(id);
+	}
+
+	return {
+		routeIds: [...candidates],
+		sharedIds,
+		sharedCodes,
+	};
+}
+
+function findStopIndexInPattern(
+	patternStops: PatternStop[],
+	candidates: Stop[],
+): number {
+	const ids = collectMatchIds(candidates);
+
+	for (let i = 0; i < patternStops.length; i++) {
+		if (ids.has(patternStops[i].stop_id)) return i;
+	}
+	for (let i = 0; i < patternStops.length; i++) {
+		const name = patternStops[i].name;
+		if (!name) continue;
+		for (const stop of candidates) {
+			if (namesLooselyMatch(name, stop.name)) return i;
+		}
+	}
+	return -1;
+}
+
+function patternStopPoint(stop: PatternStop): {
+	stop_id: string;
+	name: string;
+	latitude: number;
+	longitude: number;
+} {
+	return {
+		stop_id: stop.stop_id,
+		name: stop.name ?? stop.stop_id,
+		latitude: stop.latitude ?? 0,
+		longitude: stop.longitude ?? 0,
+	};
+}
+
 export class RoutePlanner {
 	private client: CromaClient;
 
@@ -78,19 +225,34 @@ export class RoutePlanner {
 		const maxWalk = request.maxWalkMeters ?? DEFAULT_MAX_WALK_METERS;
 		const maxTransfers = request.maxTransfers ?? DEFAULT_MAX_TRANSFERS;
 		const limitations: string[] = [];
+		const wantDebug = request.debug === true;
+		const debug: RoutePlanDebug = {
+			originStops: [],
+			destStops: [],
+			sharedRouteIds: [],
+			sharedRouteCodes: [],
+			candidatesTried: [],
+		};
+		const withDebug = <T extends RoutePlanResult>(result: T): T => {
+			if (!wantDebug) return result;
+			return { ...result, debug };
+		};
 
 		const origin = await this.resolveEndpoint(request.origin, maxWalk);
 		if (!origin) {
-			return { kind: "no_route", reason: "Could not resolve origin location" };
+			return withDebug({
+				kind: "no_route",
+				reason: "Could not resolve origin location",
+			});
 		}
 		if (origin.stops.length === 0) {
-			return {
+			return withDebug({
 				kind: "no_route",
 				reason:
 					origin.source === "name"
 						? "No TransMilenio stop or station matched the origin name"
 						: `No TransMilenio stations within ${maxWalk}m of origin`,
-			};
+			});
 		}
 
 		const destination = await this.resolveEndpoint(
@@ -98,31 +260,34 @@ export class RoutePlanner {
 			maxWalk,
 		);
 		if (!destination) {
-			return {
+			return withDebug({
 				kind: "no_route",
 				reason: "Could not resolve destination location",
-			};
+			});
 		}
 		if (destination.stops.length === 0) {
-			return {
+			return withDebug({
 				kind: "no_route",
 				reason:
 					destination.source === "name"
 						? "No TransMilenio stop or station matched the destination name"
 						: `No TransMilenio stations within ${maxWalk}m of destination`,
-			};
+			});
 		}
 
 		const originStops = origin.stops;
 		const destStops = destination.stops;
 		const originCoords = origin.point;
 		const destCoords = destination.point;
+		debug.originStops = originStops.map(debugStop);
+		debug.destStops = destStops.map(debugStop);
 
 		const directRoute = await this.findDirectRoute(
 			originStops,
 			destStops,
 			originCoords,
 			destCoords,
+			debug,
 		);
 
 		if (directRoute) {
@@ -133,7 +298,7 @@ export class RoutePlanner {
 
 			const alerts = await this.getRelevantAlerts(directRoute.segments);
 
-			return {
+			return withDebug({
 				kind: "success",
 				plan: {
 					origin: originCoords,
@@ -146,7 +311,7 @@ export class RoutePlanner {
 					timestamp: new Date().toISOString(),
 					limitations,
 				},
-			};
+			});
 		}
 
 		if (maxTransfers > 0) {
@@ -167,7 +332,7 @@ export class RoutePlanner {
 
 				const alerts = await this.getRelevantAlerts(transferRoute.segments);
 
-				return {
+				return withDebug({
 					kind: "success",
 					plan: {
 						origin: originCoords,
@@ -180,16 +345,16 @@ export class RoutePlanner {
 						timestamp: new Date().toISOString(),
 						limitations,
 					},
-				};
+				});
 			}
 		}
 
-		return {
+		return withDebug({
 			kind: "no_route",
 			reason:
 				"No route found connecting origin and destination within the specified constraints. " +
 				"Try increasing the walking distance or allowing more transfers.",
-		};
+		});
 	}
 
 	/**
@@ -234,7 +399,11 @@ export class RoutePlanner {
 				}
 			}
 
-			return { point, stops, source: "coordinates" };
+			return {
+				point,
+				stops: await this.enrichStopsWithPlatforms(stops.slice(0, 10)),
+				source: "coordinates",
+			};
 		}
 
 		if (!location.text) {
@@ -267,17 +436,50 @@ export class RoutePlanner {
 			return null;
 		}
 
-		const ranked = rankStopsByQuery(matches, query);
-		const primary = ranked[0];
+		const ranked = rankStopsByQuery(matches, query).slice(0, 10);
+		const enriched = await this.enrichStopsWithPlatforms(ranked);
+		const primary = enriched[0];
 		return {
 			point: {
 				latitude: primary.latitude,
 				longitude: primary.longitude,
 				name: primary.name,
 			},
-			stops: ranked.slice(0, 10),
+			stops: enriched,
 			source: "name",
 		};
+	}
+
+	/**
+	 * Pattern stop_ids are platforms. Stations from search may omit platforms;
+	 * hydrate via stop/v1 so matching can use platform ids.
+	 */
+	private async enrichStopsWithPlatforms(stops: Stop[]): Promise<Stop[]> {
+		const out: Stop[] = [];
+		for (const stop of stops) {
+			if (
+				stop.kind === "station" &&
+				(!stop.platforms || stop.platforms.length === 0)
+			) {
+				const detail = await this.client.getStop(stop.stop_id);
+				if (
+					detail.kind === "success" &&
+					detail.data.data.stop &&
+					detail.data.data.stop.platforms &&
+					detail.data.data.stop.platforms.length > 0
+				) {
+					out.push({
+						...stop,
+						...detail.data.data.stop,
+						// Keep search ranking fields that detail may omit.
+						distance_m: stop.distance_m ?? detail.data.data.stop.distance_m,
+					});
+					continue;
+				}
+			}
+			out.push(stop);
+		}
+		return out;
 	}
 
 	private async findDirectRoute(
@@ -285,130 +487,248 @@ export class RoutePlanner {
 		destStops: Stop[],
 		originCoords: { latitude: number; longitude: number; name: string },
 		destCoords: { latitude: number; longitude: number; name: string },
+		debug: RoutePlanDebug,
 	): Promise<{
 		segments: (WalkSegment | RouteSegment)[];
 		totalMinutes: number;
 		totalWalkMinutes: number;
 	} | null> {
-		for (const originStop of originStops) {
-			for (const destStop of destStops) {
-				const sharedRoutes = originStop.route_ids.filter((id) =>
-					destStop.route_ids.includes(id),
-				);
+		const { routeIds, sharedIds, sharedCodes } = candidateRouteIds(
+			originStops,
+			destStops,
+		);
+		debug.sharedRouteIds = sharedIds;
+		debug.sharedRouteCodes = sharedCodes;
 
-				if (sharedRoutes.length > 0) {
-					const routeResult = await this.client.getRoute(sharedRoutes[0], true);
-					if (routeResult.kind !== "success" || !routeResult.data.data.route) {
-						continue;
+		const codeById = new Map<string, string>();
+		for (const stop of [...originStops, ...destStops]) {
+			if (stop.routes) {
+				for (const route of stop.routes) {
+					if (route.short_name) {
+						codeById.set(route.route_id, route.short_name.toUpperCase());
 					}
-
-					const route = routeResult.data.data.route;
-					const pattern = route.patterns?.[0];
-					
-					const walkToOrigin = haversineDistance(
-						originCoords.latitude,
-						originCoords.longitude,
-						originStop.latitude,
-						originStop.longitude,
-					);
-					const walkFromDest = haversineDistance(
-						destStop.latitude,
-						destStop.longitude,
-						destCoords.latitude,
-						destCoords.longitude,
-					);
-
-					const walkToOriginMin = walkMinutes(walkToOrigin);
-					const walkFromDestMin = walkMinutes(walkFromDest);
-
-					const intermediateStops = this.getIntermediateStops(
-						pattern?.stops ?? [],
-						originStop.stop_id,
-						destStop.stop_id,
-					);
-
-					const transitMinutes = this.estimateTransitTime(
-						pattern?.stops ?? [],
-						originStop.stop_id,
-						destStop.stop_id,
-					);
-
-					const segments: (WalkSegment | RouteSegment)[] = [];
-
-					if (walkToOrigin > 50) {
-						segments.push({
-							kind: "walk",
-							from: {
-								latitude: originCoords.latitude,
-								longitude: originCoords.longitude,
-								name: originCoords.name,
-							},
-							to: {
-								stop_id: originStop.stop_id,
-								name: originStop.name,
-								latitude: originStop.latitude,
-								longitude: originStop.longitude,
-							},
-							distanceMeters: Math.round(walkToOrigin),
-							estimatedMinutes: walkToOriginMin,
-						});
-					}
-
-					segments.push({
-						kind: "transit",
-						route: {
-							route_id: route.route_id,
-							short_name: route.short_name,
-							long_name: route.long_name,
-							system: route.system,
-							color: route.color,
-						},
-						boardStop: {
-							stop_id: originStop.stop_id,
-							name: originStop.name,
-							latitude: originStop.latitude,
-							longitude: originStop.longitude,
-						},
-						alightStop: {
-							stop_id: destStop.stop_id,
-							name: destStop.name,
-							latitude: destStop.latitude,
-							longitude: destStop.longitude,
-						},
-						intermediateStops,
-						estimatedMinutes: transitMinutes,
-						geometry: pattern?.geometry?.coordinates ?? null,
-					});
-
-					if (walkFromDest > 50) {
-						segments.push({
-							kind: "walk",
-							from: {
-								latitude: destStop.latitude,
-								longitude: destStop.longitude,
-								name: destStop.name,
-							},
-							to: {
-								stop_id: destStop.stop_id,
-								name: destCoords.name,
-								latitude: destCoords.latitude,
-								longitude: destCoords.longitude,
-							},
-							distanceMeters: Math.round(walkFromDest),
-							estimatedMinutes: walkFromDestMin,
-						});
-					}
-
-					return {
-						segments,
-						totalMinutes: walkToOriginMin + transitMinutes + walkFromDestMin,
-						totalWalkMinutes: walkToOriginMin + walkFromDestMin,
-					};
 				}
+			}
+			const n = Math.min(stop.route_ids.length, stop.route_codes.length);
+			for (let i = 0; i < n; i++) {
+				codeById.set(stop.route_ids[i], stop.route_codes[i].toUpperCase());
+			}
+		}
+
+		for (const routeId of routeIds) {
+			const routeCode = codeById.get(routeId) ?? null;
+			// Match without geometry first (smaller payload); hydrate geometry on hit.
+			let routeResult = await this.client.getRoute(routeId, false);
+			if (routeResult.kind === "error") {
+				debug.candidatesTried.push({
+					route_id: routeId,
+					route_code: routeCode,
+					outcome: `getRoute error: ${routeResult.message}`,
+				});
+				continue;
+			}
+			if (!routeResult.data.data.route) {
+				debug.candidatesTried.push({
+					route_id: routeId,
+					route_code: routeCode,
+					outcome: "getRoute found=false",
+				});
+				continue;
+			}
+
+			let route = routeResult.data.data.route;
+			let patterns = route.patterns ?? [];
+			if (patterns.length === 0) {
+				debug.candidatesTried.push({
+					route_id: routeId,
+					route_code: routeCode ?? route.short_name,
+					outcome: "route has no patterns",
+				});
+				continue;
+			}
+
+			for (let p = 0; p < patterns.length; p++) {
+				const pattern = patterns[p];
+				const boardIdx = findStopIndexInPattern(pattern.stops, originStops);
+				const alightIdx = findStopIndexInPattern(pattern.stops, destStops);
+				if (boardIdx === -1 || alightIdx === -1) {
+					debug.candidatesTried.push({
+						route_id: routeId,
+						route_code: routeCode ?? route.short_name,
+						outcome: `pattern stops missing endpoints (board=${boardIdx}, alight=${alightIdx}, stops=${pattern.stops.length}, originIds=${[...collectMatchIds(originStops)].slice(0, 8).join("|")}, destIds=${[...collectMatchIds(destStops)].slice(0, 8).join("|")})`,
+					});
+					continue;
+				}
+				if (boardIdx >= alightIdx) {
+					debug.candidatesTried.push({
+						route_id: routeId,
+						route_code: routeCode ?? route.short_name,
+						outcome: `wrong direction (board seq ${boardIdx} >= alight ${alightIdx})`,
+					});
+					continue;
+				}
+
+				let geometry = pattern.geometry?.coordinates ?? null;
+				if (!geometry) {
+					const withGeom = await this.client.getRoute(routeId, true);
+					if (
+						withGeom.kind === "success" &&
+						withGeom.data.data.route?.patterns?.[p]?.geometry?.coordinates
+					) {
+						route = withGeom.data.data.route;
+						patterns = route.patterns ?? patterns;
+						geometry =
+							patterns[p]?.geometry?.coordinates ?? null;
+					}
+				}
+
+				const boardPatternStop = (patterns[p] ?? pattern).stops[boardIdx];
+				const alightPatternStop = (patterns[p] ?? pattern).stops[alightIdx];
+				const boardStop = patternStopPoint(boardPatternStop);
+				const alightStop = patternStopPoint(alightPatternStop);
+				const patternStops = (patterns[p] ?? pattern).stops;
+
+				const built = this.buildDirectSegments({
+					route,
+					patternStops,
+					boardIdx,
+					alightIdx,
+					boardStop,
+					alightStop,
+					originCoords,
+					destCoords,
+					geometry,
+				});
+
+				debug.candidatesTried.push({
+					route_id: routeId,
+					route_code: routeCode ?? route.short_name,
+					outcome: `matched board=${boardStop.stop_id} alight=${alightStop.stop_id}`,
+				});
+				return built;
 			}
 		}
 
 		return null;
+	}
+
+	private buildDirectSegments(args: {
+		route: Route;
+		patternStops: PatternStop[];
+		boardIdx: number;
+		alightIdx: number;
+		boardStop: {
+			stop_id: string;
+			name: string;
+			latitude: number;
+			longitude: number;
+		};
+		alightStop: {
+			stop_id: string;
+			name: string;
+			latitude: number;
+			longitude: number;
+		};
+		originCoords: { latitude: number; longitude: number; name: string };
+		destCoords: { latitude: number; longitude: number; name: string };
+		geometry: number[][] | null;
+	}): {
+		segments: (WalkSegment | RouteSegment)[];
+		totalMinutes: number;
+		totalWalkMinutes: number;
+	} {
+		const {
+			route,
+			patternStops,
+			boardIdx,
+			alightIdx,
+			boardStop,
+			alightStop,
+			originCoords,
+			destCoords,
+			geometry,
+		} = args;
+
+		const walkToOrigin = haversineDistance(
+			originCoords.latitude,
+			originCoords.longitude,
+			boardStop.latitude,
+			boardStop.longitude,
+		);
+		const walkFromDest = haversineDistance(
+			alightStop.latitude,
+			alightStop.longitude,
+			destCoords.latitude,
+			destCoords.longitude,
+		);
+		const walkToOriginMin = walkMinutes(walkToOrigin);
+		const walkFromDestMin = walkMinutes(walkFromDest);
+		const transitMinutes = this.estimateTransitTime(
+			patternStops,
+			boardIdx,
+			alightIdx,
+		);
+		const intermediateStops = patternStops
+			.slice(boardIdx + 1, alightIdx)
+			.map(patternStopPoint);
+
+		const segments: (WalkSegment | RouteSegment)[] = [];
+		if (walkToOrigin > 50) {
+			segments.push({
+				kind: "walk",
+				from: {
+					latitude: originCoords.latitude,
+					longitude: originCoords.longitude,
+					name: originCoords.name,
+				},
+				to: boardStop,
+				distanceMeters: Math.round(walkToOrigin),
+				estimatedMinutes: walkToOriginMin,
+			});
+		}
+
+		segments.push({
+			kind: "transit",
+			route: {
+				route_id: route.route_id,
+				short_name: route.short_name,
+				long_name: route.long_name,
+				system: route.system,
+				color: route.color,
+			},
+			boardStop,
+			alightStop,
+			intermediateStops,
+			estimatedMinutes: transitMinutes,
+			geometry: geometry
+				? geometry.map((coord) => [coord[0], coord[1]] as [number, number])
+				: null,
+		});
+
+		if (walkFromDest > 50) {
+			segments.push({
+				kind: "walk",
+				from: {
+					latitude: alightStop.latitude,
+					longitude: alightStop.longitude,
+					name: alightStop.name,
+				},
+				to: {
+					stop_id: alightStop.stop_id,
+					name: destCoords.name,
+					latitude: destCoords.latitude,
+					longitude: destCoords.longitude,
+				},
+				distanceMeters: Math.round(walkFromDest),
+				estimatedMinutes: walkFromDestMin,
+			});
+		}
+
+		return {
+			segments,
+			totalMinutes: walkToOriginMin + transitMinutes + walkFromDestMin,
+			totalWalkMinutes: walkToOriginMin + walkFromDestMin,
+		};
 	}
 
 	private async findTransferRoute(
@@ -425,197 +745,199 @@ export class RoutePlanner {
 	} | null> {
 		for (const originStop of originStops) {
 			for (const originRouteId of originStop.route_ids.slice(0, 3)) {
-				const originRouteResult = await this.client.getRoute(originRouteId, false);
-				if (originRouteResult.kind !== "success" || !originRouteResult.data.data.route) {
+				const originRouteResult = await this.client.getRoute(
+					originRouteId,
+					false,
+				);
+				if (
+					originRouteResult.kind !== "success" ||
+					!originRouteResult.data.data.route
+				) {
 					continue;
 				}
 				const originRoute = originRouteResult.data.data.route;
 				const originPattern = originRoute.patterns?.[0];
 				if (!originPattern) continue;
 
-				for (const transferStopData of originPattern.stops) {
-					const transferStopResult = await this.client.getStop(transferStopData.stop_id);
-					if (transferStopResult.kind !== "success" || !transferStopResult.data.data.stop) {
+				const boardIdx = findStopIndexInPattern(originPattern.stops, [
+					originStop,
+					...originStops,
+				]);
+				if (boardIdx === -1) continue;
+
+				for (
+					let transferIdx = boardIdx + 1;
+					transferIdx < originPattern.stops.length;
+					transferIdx++
+				) {
+					const transferStopData = originPattern.stops[transferIdx];
+					const transferStopResult = await this.client.getStop(
+						transferStopData.stop_id,
+					);
+					if (
+						transferStopResult.kind !== "success" ||
+						!transferStopResult.data.data.stop
+					) {
 						continue;
 					}
 					const transferStop = transferStopResult.data.data.stop;
+					const connecting = candidateRouteIds([transferStop], destStops)
+						.routeIds.filter((id) => id !== originRouteId)
+						.slice(0, 3);
 
-					for (const destStop of destStops) {
-						const connectingRoutes = transferStop.route_ids.filter(
-							(id) => destStop.route_ids.includes(id) && id !== originRouteId,
+					for (const connectingId of connecting) {
+						const connectingRouteResult = await this.client.getRoute(
+							connectingId,
+							true,
+						);
+						if (
+							connectingRouteResult.kind !== "success" ||
+							!connectingRouteResult.data.data.route
+						) {
+							continue;
+						}
+						const connectingRoute = connectingRouteResult.data.data.route;
+						const connectingPattern = connectingRoute.patterns?.[0];
+						if (!connectingPattern) continue;
+
+						const secondBoardIdx = findStopIndexInPattern(
+							connectingPattern.stops,
+							[transferStop],
+						);
+						const alightIdx = findStopIndexInPattern(
+							connectingPattern.stops,
+							destStops,
+						);
+						if (
+							secondBoardIdx === -1 ||
+							alightIdx === -1 ||
+							secondBoardIdx >= alightIdx
+						) {
+							continue;
+						}
+
+						const boardStop = patternStopPoint(originPattern.stops[boardIdx]);
+						const transferPoint = patternStopPoint(transferStopData);
+						const alightStop = patternStopPoint(
+							connectingPattern.stops[alightIdx],
 						);
 
-						if (connectingRoutes.length > 0) {
-							const connectingRouteResult = await this.client.getRoute(
-								connectingRoutes[0],
-								true,
-							);
-							if (
-								connectingRouteResult.kind !== "success" ||
-								!connectingRouteResult.data.data.route
-							) {
-								continue;
-							}
+						const walkToOrigin = haversineDistance(
+							originCoords.latitude,
+							originCoords.longitude,
+							boardStop.latitude,
+							boardStop.longitude,
+						);
+						const walkFromDest = haversineDistance(
+							alightStop.latitude,
+							alightStop.longitude,
+							destCoords.latitude,
+							destCoords.longitude,
+						);
+						const walkToOriginMin = walkMinutes(walkToOrigin);
+						const walkFromDestMin = walkMinutes(walkFromDest);
+						const firstLegMinutes = this.estimateTransitTime(
+							originPattern.stops,
+							boardIdx,
+							transferIdx,
+						);
+						const secondLegMinutes = this.estimateTransitTime(
+							connectingPattern.stops,
+							secondBoardIdx,
+							alightIdx,
+						);
 
-							const connectingRoute = connectingRouteResult.data.data.route;
-							const connectingPattern = connectingRoute.patterns?.[0];
-
-							const walkToOrigin = haversineDistance(
-								originCoords.latitude,
-								originCoords.longitude,
-								originStop.latitude,
-								originStop.longitude,
-							);
-							const walkFromDest = haversineDistance(
-								destStop.latitude,
-								destStop.longitude,
-								destCoords.latitude,
-								destCoords.longitude,
-							);
-
-							const walkToOriginMin = walkMinutes(walkToOrigin);
-							const walkFromDestMin = walkMinutes(walkFromDest);
-
-							const firstLegMinutes = this.estimateTransitTime(
-								originPattern.stops,
-								originStop.stop_id,
-								transferStop.stop_id,
-							);
-							const secondLegMinutes = this.estimateTransitTime(
-								connectingPattern?.stops ?? [],
-								transferStop.stop_id,
-								destStop.stop_id,
-							);
-
-							const segments: (WalkSegment | RouteSegment | TransferSegment)[] = [];
-
-							if (walkToOrigin > 50) {
-								segments.push({
-									kind: "walk",
-									from: {
-										latitude: originCoords.latitude,
-										longitude: originCoords.longitude,
-										name: originCoords.name,
-									},
-									to: {
-										stop_id: originStop.stop_id,
-										name: originStop.name,
-										latitude: originStop.latitude,
-										longitude: originStop.longitude,
-									},
-									distanceMeters: Math.round(walkToOrigin),
-									estimatedMinutes: walkToOriginMin,
-								});
-							}
-
+						const segments: (WalkSegment | RouteSegment | TransferSegment)[] =
+							[];
+						if (walkToOrigin > 50) {
 							segments.push({
-								kind: "transit",
-								route: {
-									route_id: originRoute.route_id,
-									short_name: originRoute.short_name,
-									long_name: originRoute.long_name,
-									system: originRoute.system,
-									color: originRoute.color,
+								kind: "walk",
+								from: {
+									latitude: originCoords.latitude,
+									longitude: originCoords.longitude,
+									name: originCoords.name,
 								},
-								boardStop: {
-									stop_id: originStop.stop_id,
-									name: originStop.name,
-									latitude: originStop.latitude,
-									longitude: originStop.longitude,
-								},
-								alightStop: {
-									stop_id: transferStop.stop_id,
-									name: transferStop.name,
-									latitude: transferStop.latitude,
-									longitude: transferStop.longitude,
-								},
-								intermediateStops: this.getIntermediateStops(
-									originPattern.stops,
-									originStop.stop_id,
-									transferStop.stop_id,
-								),
-								estimatedMinutes: firstLegMinutes,
-								geometry: null,
+								to: boardStop,
+								distanceMeters: Math.round(walkToOrigin),
+								estimatedMinutes: walkToOriginMin,
 							});
-
-							segments.push({
-								kind: "transfer",
-								fromStop: {
-									stop_id: transferStop.stop_id,
-									name: transferStop.name,
-									latitude: transferStop.latitude,
-									longitude: transferStop.longitude,
-								},
-								toStop: {
-									stop_id: transferStop.stop_id,
-									name: transferStop.name,
-									latitude: transferStop.latitude,
-									longitude: transferStop.longitude,
-								},
-								walkMinutes: 3,
-							});
-
-							segments.push({
-								kind: "transit",
-								route: {
-									route_id: connectingRoute.route_id,
-									short_name: connectingRoute.short_name,
-									long_name: connectingRoute.long_name,
-									system: connectingRoute.system,
-									color: connectingRoute.color,
-								},
-								boardStop: {
-									stop_id: transferStop.stop_id,
-									name: transferStop.name,
-									latitude: transferStop.latitude,
-									longitude: transferStop.longitude,
-								},
-								alightStop: {
-									stop_id: destStop.stop_id,
-									name: destStop.name,
-									latitude: destStop.latitude,
-									longitude: destStop.longitude,
-								},
-								intermediateStops: this.getIntermediateStops(
-									connectingPattern?.stops ?? [],
-									transferStop.stop_id,
-									destStop.stop_id,
-								),
-								estimatedMinutes: secondLegMinutes,
-								geometry: connectingPattern?.geometry?.coordinates ?? null,
-							});
-
-							if (walkFromDest > 50) {
-								segments.push({
-									kind: "walk",
-									from: {
-										latitude: destStop.latitude,
-										longitude: destStop.longitude,
-										name: destStop.name,
-									},
-									to: {
-										stop_id: destStop.stop_id,
-										name: destCoords.name,
-										latitude: destCoords.latitude,
-										longitude: destCoords.longitude,
-									},
-									distanceMeters: Math.round(walkFromDest),
-									estimatedMinutes: walkFromDestMin,
-								});
-							}
-
-							return {
-								segments,
-								totalMinutes:
-									walkToOriginMin +
-									firstLegMinutes +
-									3 +
-									secondLegMinutes +
-									walkFromDestMin,
-								totalWalkMinutes: walkToOriginMin + walkFromDestMin,
-								transferCount: 1,
-							};
 						}
+						segments.push({
+							kind: "transit",
+							route: {
+								route_id: originRoute.route_id,
+								short_name: originRoute.short_name,
+								long_name: originRoute.long_name,
+								system: originRoute.system,
+								color: originRoute.color,
+							},
+							boardStop,
+							alightStop: transferPoint,
+							intermediateStops: originPattern.stops
+								.slice(boardIdx + 1, transferIdx)
+								.map(patternStopPoint),
+							estimatedMinutes: firstLegMinutes,
+							geometry: null,
+						});
+						segments.push({
+							kind: "transfer",
+							fromStop: transferPoint,
+							toStop: transferPoint,
+							walkMinutes: 3,
+						});
+						segments.push({
+							kind: "transit",
+							route: {
+								route_id: connectingRoute.route_id,
+								short_name: connectingRoute.short_name,
+								long_name: connectingRoute.long_name,
+								system: connectingRoute.system,
+								color: connectingRoute.color,
+							},
+							boardStop: patternStopPoint(
+								connectingPattern.stops[secondBoardIdx],
+							),
+							alightStop,
+							intermediateStops: connectingPattern.stops
+								.slice(secondBoardIdx + 1, alightIdx)
+								.map(patternStopPoint),
+							estimatedMinutes: secondLegMinutes,
+							geometry: connectingPattern.geometry?.coordinates
+								? connectingPattern.geometry.coordinates.map(
+										(coord) => [coord[0], coord[1]] as [number, number],
+									)
+								: null,
+						});
+						if (walkFromDest > 50) {
+							segments.push({
+								kind: "walk",
+								from: {
+									latitude: alightStop.latitude,
+									longitude: alightStop.longitude,
+									name: alightStop.name,
+								},
+								to: {
+									stop_id: alightStop.stop_id,
+									name: destCoords.name,
+									latitude: destCoords.latitude,
+									longitude: destCoords.longitude,
+								},
+								distanceMeters: Math.round(walkFromDest),
+								estimatedMinutes: walkFromDestMin,
+							});
+						}
+
+						return {
+							segments,
+							totalMinutes:
+								walkToOriginMin +
+								firstLegMinutes +
+								3 +
+								secondLegMinutes +
+								walkFromDestMin,
+							totalWalkMinutes: walkToOriginMin + walkFromDestMin,
+							transferCount: 1,
+						};
 					}
 				}
 			}
@@ -624,42 +946,24 @@ export class RoutePlanner {
 		return null;
 	}
 
-	private getIntermediateStops(
-		patternStops: Array<{ stop_id: string; name: string; latitude: number; longitude: number }>,
-		fromStopId: string,
-		toStopId: string,
-	): Array<{ stop_id: string; name: string; latitude: number; longitude: number }> {
-		const fromIdx = patternStops.findIndex((s) => s.stop_id === fromStopId);
-		const toIdx = patternStops.findIndex((s) => s.stop_id === toStopId);
-
-		if (fromIdx === -1 || toIdx === -1 || fromIdx >= toIdx) {
-			return [];
+	private estimateTransitTime(
+		patternStops: PatternStop[],
+		fromIdx: number,
+		toIdx: number,
+	): number {
+		if (fromIdx < 0 || toIdx < 0 || fromIdx >= toIdx) {
+			return 15;
 		}
 
-		return patternStops.slice(fromIdx + 1, toIdx).map((s) => ({
-			stop_id: s.stop_id,
-			name: s.name,
-			latitude: s.latitude,
-			longitude: s.longitude,
-		}));
-	}
-
-	private estimateTransitTime(
-		patternStops: Array<{ stop_id: string; minutes: number | null }>,
-		fromStopId: string,
-		toStopId: string,
-	): number {
-		const fromIdx = patternStops.findIndex((s) => s.stop_id === fromStopId);
-		const toIdx = patternStops.findIndex((s) => s.stop_id === toStopId);
-
-		if (fromIdx === -1 || toIdx === -1) {
-			return 15;
+		const fromOffset = patternStops[fromIdx].offset_seconds;
+		const toOffset = patternStops[toIdx].offset_seconds;
+		if (fromOffset != null && toOffset != null) {
+			return Math.max(Math.round((toOffset - fromOffset) / 60), 1);
 		}
 
 		const fromMinutes = patternStops[fromIdx].minutes ?? 0;
 		const toMinutes = patternStops[toIdx].minutes;
-
-		if (toMinutes !== null) {
+		if (toMinutes != null) {
 			return Math.max(toMinutes - fromMinutes, 1);
 		}
 
