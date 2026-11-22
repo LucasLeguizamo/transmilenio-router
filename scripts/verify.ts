@@ -77,6 +77,7 @@ COMMANDS:
   doctor       Run health checks (env vars, dependencies, build)
   mcp          Test MCP server tools with fixture data
   ui           Render UI components and capture screenshots
+  network      Validate local network snapshot + plan_route perf (local vs API)
   all          Run all verification steps
   help         Show this help message
 
@@ -91,6 +92,8 @@ EXAMPLES:
   pnpm verify doctor --json
   pnpm verify mcp --live
   pnpm verify mcp --live --verbose
+  pnpm verify network
+  pnpm verify network --live
   pnpm verify ui
   pnpm verify all --dry-run
 
@@ -560,6 +563,152 @@ async function runUITests(
 	}
 }
 
+async function runNetworkTests(
+	flags: Record<string, boolean | string>,
+): Promise<VerifyResult> {
+	const start = Date.now();
+
+	if (flags["dry-run"]) {
+		console.log(
+			"Would validate data/network snapshot/graph and time local vs API plan_route",
+		);
+		return {
+			success: true,
+			command: "network",
+			duration_ms: Date.now() - start,
+			output: { dry_run: true },
+		};
+	}
+
+	const { buildNetworkGraph } = await import(
+		"../src/lib/network/build-graph.js"
+	);
+	const { checkNetworkIntegrity } = await import(
+		"../src/lib/network/integrity.js"
+	);
+	const { planRouteLocal } = await import(
+		"../src/lib/network/local-planner.js"
+	);
+	const { loadNetworkBundle, loadSnapshot, loadGraph } = await import(
+		"../src/lib/network/store.js"
+	);
+	const { NetworkSnapshotSchema } = await import(
+		"../src/lib/network/types.js"
+	);
+	const { RoutePlanner } = await import("../src/lib/routing/planner.js");
+
+	const fixturePath = join(FIXTURES_DIR, "network", "mini-snapshot.json");
+	const fixtureSnapshot = NetworkSnapshotSchema.parse(
+		JSON.parse(readFileSync(fixturePath, "utf-8")),
+	);
+	const fixtureGraph = buildNetworkGraph(fixtureSnapshot);
+	const fixtureReport = checkNetworkIntegrity(fixtureSnapshot, fixtureGraph);
+
+	const liveBundle = loadNetworkBundle();
+	const diskSnapshot = loadSnapshot();
+	const diskGraph = loadGraph();
+	const liveReport =
+		diskSnapshot && diskGraph
+			? checkNetworkIntegrity(diskSnapshot, diskGraph)
+			: null;
+
+	const localOrigin = {
+		latitude: 4.6636,
+		longitude: -74.0603,
+		text: "Calle 76 con Carrera 20",
+	};
+	const localDest = {
+		latitude: 4.7616,
+		longitude: -74.0463,
+		text: "Portal del Norte",
+	};
+
+	const t0 = Date.now();
+	const localResult = await planRouteLocal(
+		{ snapshot: fixtureSnapshot, graph: fixtureGraph, fresh: true },
+		{
+			origin: localOrigin,
+			destination: localDest,
+			maxTransfers: 2,
+			maxWalkMeters: 1200,
+		},
+	);
+	const localMs = Date.now() - t0;
+
+	let apiMs: number | null = null;
+	let apiKind: string | null = null;
+	if (flags.live === true && process.env.CROMA_API_KEY) {
+		const planner = new RoutePlanner();
+		const t1 = Date.now();
+		const apiResult = await planner.planRoute({
+			origin: localOrigin,
+			destination: localDest,
+			maxTransfers: 2,
+			maxWalkMeters: 1200,
+			forceApi: true,
+		});
+		apiMs = Date.now() - t1;
+		apiKind = apiResult.kind;
+	}
+
+	const success =
+		fixtureReport.ok &&
+		localResult.kind === "success" &&
+		(liveReport ? liveReport.ok : true);
+
+	const output = {
+		fixture: fixtureReport,
+		disk: liveReport,
+		bundle_fresh: liveBundle?.fresh ?? false,
+		perf: {
+			local_plan_ms: localMs,
+			api_plan_ms: apiMs,
+			api_kind: apiKind,
+			note:
+				apiMs == null
+					? "Pass --live with CROMA_API_KEY to compare API latency"
+					: "Lower local_plan_ms vs api_plan_ms is expected after sync",
+		},
+	};
+
+	if (flags.json) {
+		console.log(JSON.stringify({ success, ...output }, null, 2));
+	} else {
+		console.log("\n🗺️  Network Checks\n");
+		console.log(
+			`${fixtureReport.ok ? "✅" : "❌"} fixture integrity (${fixtureReport.counts.stops} stops, ${fixtureReport.walk_edges} walk edges)`,
+		);
+		if (liveReport) {
+			console.log(
+				`${liveReport.ok ? "✅" : "❌"} disk snapshot integrity (${liveReport.counts.stops} stops, trunk ${liveReport.trunk_stations_reachable}/${liveReport.trunk_stations})`,
+			);
+		} else {
+			console.log(
+				"⚠️  no data/network snapshot yet — run `pnpm network:sync` with CROMA_API_KEY",
+			);
+		}
+		console.log(
+			`${localResult.kind === "success" ? "✅" : "❌"} local plan_route (fixture multimodal) in ${localMs}ms`,
+		);
+		if (apiMs != null) {
+			console.log(`⏱️  API plan_route (forceApi) in ${apiMs}ms (${apiKind})`);
+		}
+		for (const issue of fixtureReport.issues) {
+			console.log(`   fixture issue: ${issue.code} — ${issue.message}`);
+		}
+		for (const issue of liveReport?.issues ?? []) {
+			console.log(`   disk issue: ${issue.code} — ${issue.message}`);
+		}
+	}
+
+	return {
+		success,
+		command: "network",
+		duration_ms: Date.now() - start,
+		output,
+	};
+}
+
 async function runAll(
 	flags: Record<string, boolean | string>,
 ): Promise<VerifyResult> {
@@ -570,6 +719,7 @@ async function runAll(
 
 	results.push(await runDoctor(flags));
 	results.push(await runMCPTests(flags));
+	results.push(await runNetworkTests(flags));
 
 	if (!flags["dry-run"]) {
 		results.push(await runUITests(flags));
@@ -618,6 +768,9 @@ async function main(): Promise<void> {
 			break;
 		case "ui":
 			result = await runUITests(flags);
+			break;
+		case "network":
+			result = await runNetworkTests(flags);
 			break;
 		case "all":
 			result = await runAll(flags);

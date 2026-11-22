@@ -43,10 +43,12 @@ export CROMA_API_KEY=your_key_here
 git clone https://github.com/LucasLeguizamo/transmilenio-router
 cd transmilenio-router
 pnpm install
+pnpm network:sync   # local stop/route graph (gitignored; needs CROMA_API_KEY)
 pnpm dev
 ```
 
-The MCP server runs at `http://localhost:3000/api/mcp`.
+The MCP server runs at `http://localhost:3000/api/mcp`.  
+`plan_route` uses the synced network for search; Croma remains the source for live arrivals/alerts. See [docs/network-sync.md](docs/network-sync.md).
 
 ### 3. Connect to Your AI Client
 
@@ -171,6 +173,9 @@ pnpm verify doctor
 # Test MCP tools
 pnpm verify mcp
 
+# Local network snapshot integrity + plan_route latency
+pnpm verify network
+
 # Render and screenshot UI
 pnpm verify ui
 
@@ -178,7 +183,7 @@ pnpm verify ui
 pnpm verify all
 ```
 
-See `.cursor/skills/verify-transmilenio-mcp/` for the full verification guide.
+See `.cursor/skills/verify-transmilenio-mcp/` and [docs/network-sync.md](docs/network-sync.md).
 
 ## Contributing
 

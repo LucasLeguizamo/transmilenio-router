@@ -103,7 +103,7 @@ React components for rendering route maps, stop lists, and arrival boards. Desig
 ### Tool Call Flow
 
 ```
-1. AI client calls MCP tool (e.g., plan_route)
+1. AI client calls MCP tool (e.g., plan_route). Routing uses the local network snapshot when fresh (`pnpm network:sync`); Croma is used for live arrivals/alerts and as fallback if the snapshot is missing/stale. See [network-sync.md](./network-sync.md).
 2. MCP server receives request
 3. Tool parses input with Zod schema
 4. Route planner queries Croma API

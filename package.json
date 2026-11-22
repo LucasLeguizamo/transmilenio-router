@@ -23,7 +23,9 @@
 		"verify:doctor": "tsx scripts/verify.ts doctor",
 		"verify:mcp": "tsx scripts/verify.ts mcp",
 		"verify:ui": "tsx scripts/verify.ts ui",
-		"verify:all": "tsx scripts/verify.ts all"
+		"verify:network": "tsx scripts/verify.ts network",
+		"verify:all": "tsx scripts/verify.ts all",
+		"network:sync": "tsx scripts/network-sync.ts"
 	},
 	"dependencies": {
 		"@ai-sdk/openai": "^1.0.0",

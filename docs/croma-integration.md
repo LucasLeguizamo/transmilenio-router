@@ -11,6 +11,8 @@ Croma provides real-time and static data for Bogotá's public transit system inc
 - SITP (zonal buses)
 - TransMiCable (cable car)
 
+For **route planning performance**, this project syncs stop/route dataset endpoints into a local snapshot (`pnpm network:sync`) and plans against that graph. Live endpoints (arrivals, vehicles, alerts) are still called at request time. Licensing notes and why the snapshot is not committed: [network-sync.md](./network-sync.md).
+
 ## API Reference
 
 Base URL: `https://api.croma.run`

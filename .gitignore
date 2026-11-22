@@ -37,6 +37,11 @@ coverage/
 artifacts/*
 !artifacts/.gitkeep
 
+# Local Croma network snapshot (generate with pnpm network:sync; do not commit)
+# Croma ToS §4: do not redistribute the Services without written permission.
+data/network/*.json
+!data/network/README.md
+
 # Vercel
 .vercel/
 tsconfig.tsbuildinfo

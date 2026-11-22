@@ -53,6 +53,19 @@ Test MCP tools with fixture data:
 pnpm verify mcp
 ```
 
+Validate the local network snapshot (fixture always; disk snapshot after sync):
+
+```bash
+pnpm verify network
+pnpm verify network --live   # also times forceApi plan_route
+```
+
+Sync the full network (requires `CROMA_API_KEY`; output is gitignored):
+
+```bash
+pnpm network:sync --json
+```
+
 Test with live Croma API (requires `CROMA_API_KEY`):
 
 ```bash

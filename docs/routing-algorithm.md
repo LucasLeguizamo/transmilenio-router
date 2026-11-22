@@ -4,9 +4,13 @@ This document describes the route planning algorithm used by the TransMilenio MC
 
 ## Overview
 
-The routing algorithm finds transit routes between two points in Bogotá using TransMilenio and SITP data from the Croma API.
+The routing algorithm finds transit routes between two points in Bogotá using TransMilenio and SITP data.
 
-**Important:** This is a heuristic algorithm, not an optimal pathfinder. The Croma API provides stop and route data but not graph-based routing. See [Limitations](#limitations) for details.
+**Default path:** load `data/network/snapshot.json` + `graph.json` (from `pnpm network:sync`) and search locally (direct + one transfer across systems, with walking transfer edges). Croma is not called per hop.
+
+**Fallback:** if the snapshot is missing or older than `NETWORK_MAX_AGE_HOURS`, plan via live Croma stop/route lookups (heuristic, same multimodal rules).
+
+**Important:** This is a heuristic algorithm, not an optimal pathfinder. See [Limitations](#limitations) and [network-sync.md](./network-sync.md).
 
 ## Algorithm Steps
 

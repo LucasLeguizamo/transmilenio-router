@@ -101,6 +101,8 @@ export type RoutePlanRequest = {
 	maxWalkMeters?: number;
 	maxTransfers?: number;
 	debug?: boolean;
+	/** Skip local snapshot and force live Croma hop-by-hop planning. */
+	forceApi?: boolean;
 };
 
 export type RoutePlanDebugStop = {

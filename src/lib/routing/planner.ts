@@ -6,6 +6,9 @@ import {
 	looksLikeBogotaAddress,
 	looksLikeNeighborhood,
 } from "../geocode/bogota";
+import { haversineDistance, walkMinutes } from "../geo/haversine";
+import { planRouteLocal } from "../network/local-planner";
+import { loadNetworkBundle } from "../network/store";
 import type {
 	RoutePlanRequest,
 	RoutePlanResult,
@@ -16,33 +19,11 @@ import type {
 	TransferSegment,
 } from "./types";
 
-const WALK_SPEED_KMH = 4.5;
 const DEFAULT_MAX_WALK_METERS = 800;
 /** Wider catch radius after geocoding an address/neighborhood. */
 const GEOCODED_MAX_WALK_METERS = 1200;
 const TRANSFER_WALK_METERS = 350;
 const DEFAULT_MAX_TRANSFERS = 2;
-
-function haversineDistance(
-	lat1: number,
-	lon1: number,
-	lat2: number,
-	lon2: number,
-): number {
-	const R = 6371000;
-	const toRad = (deg: number) => (deg * Math.PI) / 180;
-	const dLat = toRad(lat2 - lat1);
-	const dLon = toRad(lon2 - lon1);
-	const a =
-		Math.sin(dLat / 2) ** 2 +
-		Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-	return R * c;
-}
-
-function walkMinutes(distanceMeters: number): number {
-	return Math.ceil((distanceMeters / 1000 / WALK_SPEED_KMH) * 60);
-}
 
 type ResolvedPoint = {
 	latitude: number;
@@ -234,6 +215,7 @@ export class RoutePlanner {
 		const maxTransfers = request.maxTransfers ?? DEFAULT_MAX_TRANSFERS;
 		const limitations: string[] = [];
 		const wantDebug = request.debug === true;
+		const forceApi = request.forceApi === true;
 		const debug: RoutePlanDebug = {
 			originStops: [],
 			destStops: [],
@@ -245,6 +227,32 @@ export class RoutePlanner {
 			if (!wantDebug) return result;
 			return { ...result, debug };
 		};
+
+		if (!forceApi) {
+			const bundle = loadNetworkBundle();
+			if (bundle?.fresh) {
+				const local = await planRouteLocal(bundle, request);
+				if (local.kind === "success") {
+					const alerts = await this.getRelevantAlerts(local.plan.segments);
+					return withDebug({
+						kind: "success",
+						plan: {
+							...local.plan,
+							alerts,
+							limitations: [
+								...local.plan.limitations,
+								...(wantDebug
+									? ["planner=local_network"]
+									: []),
+							],
+						},
+					});
+				}
+				if (local.kind === "no_route") {
+					return withDebug(local);
+				}
+			}
+		}
 
 		const origin = await this.resolveEndpoint(request.origin, maxWalk);
 		if (!origin) {
