@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { isSuccessfulToolResult } from "../src/lib/mcp/result";
+import {
+	isSuccessfulToolResult,
+	isSuccessfulPlanRouteResult,
+	isSuccessfulToolResultFor,
+} from "../src/lib/mcp/result";
+import liveNoRoute from "./__fixtures__/mcp-plan-route-no-stations.json";
 
 describe("isSuccessfulToolResult", () => {
 	it("passes a normal tool success payload", () => {
@@ -37,3 +42,27 @@ describe("isSuccessfulToolResult", () => {
 		expect(isSuccessfulToolResult({})).toBe(false);
 	});
 });
+
+describe("isSuccessfulPlanRouteResult", () => {
+	it("fails the live no-station shape that previously false-greened", () => {
+		expect(isSuccessfulPlanRouteResult(liveNoRoute)).toBe(false);
+		expect(isSuccessfulToolResultFor("plan_route", liveNoRoute)).toBe(false);
+		// Generic success check alone is not enough for plan_route.
+		expect(isSuccessfulToolResult(liveNoRoute)).toBe(true);
+	});
+
+	it("requires a transit Take leg", () => {
+		expect(
+			isSuccessfulPlanRouteResult({
+				content: [
+					{
+						type: "text",
+						text:
+							"Route from Portal del Norte to Calle 100\nTotal time: ~25 minutes\n\nSteps:\n1. Take B10 from Portal del Norte to Calle 100 (~20 min)",
+					},
+				],
+			}),
+		).toBe(true);
+	});
+});
+

@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { chromium, Browser } from "playwright";
 import {
-	isSuccessfulToolResult,
+	isSuccessfulToolResultFor,
 	type ToolResultLike,
 } from "../src/lib/mcp/result";
 
@@ -317,7 +317,7 @@ async function runMCPTests(
 			const output = fixtures[tool] as ToolResultLike;
 			results.push({
 				tool,
-				success: isSuccessfulToolResult(output),
+				success: isSuccessfulToolResultFor(tool, output),
 				output,
 			});
 		}
@@ -342,7 +342,7 @@ async function runMCPTests(
 				const output = await fn();
 				results.push({
 					tool,
-					success: isSuccessfulToolResult(output),
+					success: isSuccessfulToolResultFor(tool, output),
 					output,
 				});
 				return output;

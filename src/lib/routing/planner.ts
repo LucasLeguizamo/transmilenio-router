@@ -33,6 +33,40 @@ function walkMinutes(distanceMeters: number): number {
 	return Math.ceil((distanceMeters / 1000 / WALK_SPEED_KMH) * 60);
 }
 
+type ResolvedPoint = {
+	latitude: number;
+	longitude: number;
+	name: string;
+};
+
+type ResolvedEndpoint = {
+	point: ResolvedPoint;
+	/** Candidate board/alight stops from name match or proximity search. */
+	stops: Stop[];
+	source: "name" | "coordinates";
+};
+
+function scoreStopMatch(stop: Stop, query: string): number {
+	const q = query.trim().toLowerCase();
+	const name = stop.name.toLowerCase();
+	const code = stop.code?.toLowerCase() ?? "";
+	let score = 0;
+
+	if (stop.kind === "station") score += 100;
+	if (name === q || code === q) score += 50;
+	else if (name.startsWith(q) || q.startsWith(name)) score += 30;
+	else if (name.includes(q) || q.includes(name)) score += 15;
+	if (code && (code === q || code.includes(q))) score += 20;
+
+	return score;
+}
+
+function rankStopsByQuery(stops: Stop[], query: string): Stop[] {
+	return [...stops].sort(
+		(a, b) => scoreStopMatch(b, query) - scoreStopMatch(a, query),
+	);
+}
+
 export class RoutePlanner {
 	private client: CromaClient;
 
@@ -45,56 +79,44 @@ export class RoutePlanner {
 		const maxTransfers = request.maxTransfers ?? DEFAULT_MAX_TRANSFERS;
 		const limitations: string[] = [];
 
-		const originCoords = await this.resolveLocation(request.origin);
-		if (!originCoords) {
+		const origin = await this.resolveEndpoint(request.origin, maxWalk);
+		if (!origin) {
 			return { kind: "no_route", reason: "Could not resolve origin location" };
 		}
-
-		const destCoords = await this.resolveLocation(request.destination);
-		if (!destCoords) {
-			return { kind: "no_route", reason: "Could not resolve destination location" };
-		}
-
-		const originStopsResult = await this.client.searchStops({
-			latitude: originCoords.latitude,
-			longitude: originCoords.longitude,
-			radius_m: maxWalk,
-			kind: "station",
-			per_page: 20,
-		});
-
-		if (originStopsResult.kind === "error") {
-			return { kind: "error", message: originStopsResult.message };
-		}
-
-		const destStopsResult = await this.client.searchStops({
-			latitude: destCoords.latitude,
-			longitude: destCoords.longitude,
-			radius_m: maxWalk,
-			kind: "station",
-			per_page: 20,
-		});
-
-		if (destStopsResult.kind === "error") {
-			return { kind: "error", message: destStopsResult.message };
-		}
-
-		const originStops = originStopsResult.data.data.stops;
-		const destStops = destStopsResult.data.data.stops;
-
-		if (originStops.length === 0) {
+		if (origin.stops.length === 0) {
 			return {
 				kind: "no_route",
-				reason: `No TransMilenio stations within ${maxWalk}m of origin`,
+				reason:
+					origin.source === "name"
+						? "No TransMilenio stop or station matched the origin name"
+						: `No TransMilenio stations within ${maxWalk}m of origin`,
 			};
 		}
 
-		if (destStops.length === 0) {
+		const destination = await this.resolveEndpoint(
+			request.destination,
+			maxWalk,
+		);
+		if (!destination) {
 			return {
 				kind: "no_route",
-				reason: `No TransMilenio stations within ${maxWalk}m of destination`,
+				reason: "Could not resolve destination location",
 			};
 		}
+		if (destination.stops.length === 0) {
+			return {
+				kind: "no_route",
+				reason:
+					destination.source === "name"
+						? "No TransMilenio stop or station matched the destination name"
+						: `No TransMilenio stations within ${maxWalk}m of destination`,
+			};
+		}
+
+		const originStops = origin.stops;
+		const destStops = destination.stops;
+		const originCoords = origin.point;
+		const destCoords = destination.point;
 
 		const directRoute = await this.findDirectRoute(
 			originStops,
@@ -106,7 +128,7 @@ export class RoutePlanner {
 		if (directRoute) {
 			limitations.push(
 				"This route uses a simplified algorithm based on shared routes between stops. " +
-				"Actual travel times may vary based on traffic and service frequency.",
+					"Actual travel times may vary based on traffic and service frequency.",
 			);
 
 			const alerts = await this.getRelevantAlerts(directRoute.segments);
@@ -114,16 +136,8 @@ export class RoutePlanner {
 			return {
 				kind: "success",
 				plan: {
-					origin: {
-						latitude: originCoords.latitude,
-						longitude: originCoords.longitude,
-						name: originCoords.name,
-					},
-					destination: {
-						latitude: destCoords.latitude,
-						longitude: destCoords.longitude,
-						name: destCoords.name,
-					},
+					origin: originCoords,
+					destination: destCoords,
 					segments: directRoute.segments,
 					totalMinutes: directRoute.totalMinutes,
 					totalWalkMinutes: directRoute.totalWalkMinutes,
@@ -147,8 +161,8 @@ export class RoutePlanner {
 			if (transferRoute) {
 				limitations.push(
 					"This route uses a simplified transfer algorithm. " +
-					"The Croma API does not provide full graph-based routing, so this is a best-effort approximation. " +
-					"Consider checking TransMilenio official sources for verified routes.",
+						"The Croma API does not provide full graph-based routing, so this is a best-effort approximation. " +
+						"Consider checking TransMilenio official sources for verified routes.",
 				);
 
 				const alerts = await this.getRelevantAlerts(transferRoute.segments);
@@ -156,16 +170,8 @@ export class RoutePlanner {
 				return {
 					kind: "success",
 					plan: {
-						origin: {
-							latitude: originCoords.latitude,
-							longitude: originCoords.longitude,
-							name: originCoords.name,
-						},
-						destination: {
-							latitude: destCoords.latitude,
-							longitude: destCoords.longitude,
-							name: destCoords.name,
-						},
+						origin: originCoords,
+						destination: destCoords,
 						segments: transferRoute.segments,
 						totalMinutes: transferRoute.totalMinutes,
 						totalWalkMinutes: transferRoute.totalWalkMinutes,
@@ -186,34 +192,92 @@ export class RoutePlanner {
 		};
 	}
 
-	private async resolveLocation(
+	/**
+	 * Resolve a text or coordinate endpoint into a point plus candidate stops.
+	 * Text inputs use Croma stops-search (stations preferred) and keep those
+	 * matches as candidates — they are not discarded for a second proximity pass.
+	 */
+	private async resolveEndpoint(
 		location: RoutePlanRequest["origin"],
-	): Promise<{ latitude: number; longitude: number; name: string } | null> {
+		maxWalkMeters: number,
+	): Promise<ResolvedEndpoint | null> {
 		if (location.latitude !== undefined && location.longitude !== undefined) {
-			return {
+			const point: ResolvedPoint = {
 				latitude: location.latitude,
 				longitude: location.longitude,
-				name: location.text ?? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`,
+				name:
+					location.text ??
+					`${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`,
 			};
-		}
 
-		if (location.text) {
-			const result = await this.client.searchStops({
-				query: location.text,
-				per_page: 1,
+			const stations = await this.client.searchStops({
+				latitude: location.latitude,
+				longitude: location.longitude,
+				radius_m: maxWalkMeters,
+				kind: "station",
+				per_page: 20,
 			});
-
-			if (result.kind === "success" && result.data.data.stops.length > 0) {
-				const stop = result.data.data.stops[0];
-				return {
-					latitude: stop.latitude,
-					longitude: stop.longitude,
-					name: stop.name,
-				};
+			if (stations.kind === "error") {
+				return { point, stops: [], source: "coordinates" };
 			}
+
+			let stops = stations.data.data.stops;
+			if (stops.length === 0) {
+				const anyStops = await this.client.searchStops({
+					latitude: location.latitude,
+					longitude: location.longitude,
+					radius_m: maxWalkMeters,
+					per_page: 20,
+				});
+				if (anyStops.kind === "success") {
+					stops = anyStops.data.data.stops;
+				}
+			}
+
+			return { point, stops, source: "coordinates" };
 		}
 
-		return null;
+		if (!location.text) {
+			return null;
+		}
+
+		const query = location.text.trim();
+		const stationMatches = await this.client.searchStops({
+			query,
+			kind: "station",
+			per_page: 20,
+		});
+		if (stationMatches.kind === "error") {
+			return null;
+		}
+
+		let matches = stationMatches.data.data.stops;
+		if (matches.length === 0) {
+			const anyMatches = await this.client.searchStops({
+				query,
+				per_page: 20,
+			});
+			if (anyMatches.kind === "error") {
+				return null;
+			}
+			matches = anyMatches.data.data.stops;
+		}
+
+		if (matches.length === 0) {
+			return null;
+		}
+
+		const ranked = rankStopsByQuery(matches, query);
+		const primary = ranked[0];
+		return {
+			point: {
+				latitude: primary.latitude,
+				longitude: primary.longitude,
+				name: primary.name,
+			},
+			stops: ranked.slice(0, 10),
+			source: "name",
+		};
 	}
 
 	private async findDirectRoute(
